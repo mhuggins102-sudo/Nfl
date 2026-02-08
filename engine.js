@@ -370,7 +370,9 @@ function wpHomeFromState({homeScore,awayScore,possIsHome,period,clock}){
 
   const poss = possIsHome==null ? 0 : (possIsHome ? 1 : -1);
 
-  let x = 0.18*sd*lateFactor + 0.70*poss;
+  // Possession bump: ~3-4% WP at sigmoid midpoint, realistic for NFL.
+  // Previous value (0.70) caused ~17% swings on kickoffs which is wrong.
+  let x = 0.18*sd*lateFactor + 0.25*poss;
 
   if(remSafe!=null && remSafe<=120 && period<=4 && sd!==0){
     const tight = clamp(Math.abs(sd)/8, 0, 1);
@@ -455,12 +457,13 @@ function computeWPSeries(d){
     prevWp=wp;
 
     const rem=gameRemainingSec(per, clk);
+    const elapsed=gameElapsedSec(per, clk);
     series.push({
       wp, delta, absDelta,
       period:per,
       clock:clk,
       remSec:rem,
-      tMin: (rem!=null ? (60 - rem/60) : null),
+      tMin: (elapsed!=null ? elapsed/60 : null),
       text:normSpace(p.text||p.shortText||p.type?.text||""),
       teamId:possTeamId,
       homeScore:lastScore.homeScore,
@@ -668,7 +671,9 @@ function getTopLeveragePlays(wpSeries, n=6){
     wp:x.wp,
     homeScore:x.homeScore,
     awayScore:x.awayScore,
-    text:titleizePlay(x.text)
+    text:titleizePlay(x.text),
+    type:x.type||"",
+    tag:x.tag||""
   }));
 }
 
@@ -801,6 +806,39 @@ export function buildSummaryData(g,d,exc){
   // Final margin
   const finalMargin = Math.abs(g.hs-g.as);
 
+  // Playoff round label
+  let playoffRound="";
+  if(g.season?.type===3){
+    const pwk=g.week?.number||0;
+    if(pwk===1)playoffRound="Wild Card";
+    else if(pwk===2)playoffRound="Wild Card";
+    else if(pwk===3)playoffRound="Divisional Round";
+    else if(pwk===4)playoffRound="Conference Championship";
+    else if(pwk===5)playoffRound="Super Bowl";
+  }
+
+  // Extract notable non-scoring plays: turnovers, 4th down conversions, big gains
+  const allPlays=getAllPlays(d);
+  const notablePlays=[];
+  for(const p of allPlays){
+    const txt=normSpace(p.text||p.shortText||"");
+    const lo=txt.toLowerCase();
+    const ty=(p.type?.text||"").toLowerCase();
+    const yds=p.statYardage||0;
+    const per=p.period?.number||0;
+    const clk=p.clock?.displayValue||"";
+    const team=p.team?.abbreviation||p._driveTeamId||"";
+    if(lo.includes("intercept")||ty.includes("interception")){
+      notablePlays.push({type:"INT",text:txt,period:per,clock:clk,team,yds});
+    } else if(lo.includes("fumble")&&(lo.includes("recovered by")||lo.includes("forced by"))){
+      notablePlays.push({type:"FUM",text:txt,period:per,clock:clk,team,yds});
+    } else if(lo.includes("4th")&&(lo.includes("pass complete")||lo.includes("rush "))){
+      notablePlays.push({type:"4TH",text:txt,period:per,clock:clk,team,yds});
+    } else if(yds>=40&&!lo.includes("punt")&&!lo.includes("kickoff")){
+      notablePlays.push({type:"BIG",text:txt,period:per,clock:clk,team,yds});
+    }
+  }
+
   return{
     matchup:`${tn(g.at)} at ${tn(g.ht)}`,
     awayTeam:g.at,homeTeam:g.ht,
@@ -827,6 +865,8 @@ export function buildSummaryData(g,d,exc){
     quarterNarrative: quarterNarr,
     marginByQ,
     scoringPlays,
+    notablePlays,
+    playoffRound,
     rivalryNote,
     stakesNote,
     wpStats,
