@@ -200,7 +200,7 @@ export function buildBox(d){
   const lines=[];
   for(const c of [away,home]){
     const team=c?.team?.abbreviation||"";
-    const qs=(c?.linescores||[]).map(x=>{if(!x)return"0";if(x.displayValue!=null&&x.displayValue!=="")return String(x.displayValue);if(x.value!=null)return String(x.value);return"0"});
+    const qs=(c?.linescores||[]).map(x=>String((x&&x.value!=null)?x.value:0));
     const total=String((c&&c.score!=null)?c.score:"");
     lines.push({team,qs,total,win:c?.winner});
   }
@@ -370,9 +370,7 @@ function wpHomeFromState({homeScore,awayScore,possIsHome,period,clock}){
 
   const poss = possIsHome==null ? 0 : (possIsHome ? 1 : -1);
 
-  // Possession bump: ~3-4% WP at sigmoid midpoint, realistic for NFL.
-  // Previous value (0.70) caused ~17% swings on kickoffs which is wrong.
-  let x = 0.18*sd*lateFactor + 0.25*poss;
+  let x = 0.18*sd*lateFactor + 0.70*poss;
 
   if(remSafe!=null && remSafe<=120 && period<=4 && sd!==0){
     const tight = clamp(Math.abs(sd)/8, 0, 1);
@@ -457,13 +455,12 @@ function computeWPSeries(d){
     prevWp=wp;
 
     const rem=gameRemainingSec(per, clk);
-    const elapsed=gameElapsedSec(per, clk);
     series.push({
       wp, delta, absDelta,
       period:per,
       clock:clk,
       remSec:rem,
-      tMin: (elapsed!=null ? elapsed/60 : null),
+      tMin: (rem!=null ? (60 - rem/60) : null),
       text:normSpace(p.text||p.shortText||p.type?.text||""),
       teamId:possTeamId,
       homeScore:lastScore.homeScore,
@@ -671,9 +668,7 @@ function getTopLeveragePlays(wpSeries, n=6){
     wp:x.wp,
     homeScore:x.homeScore,
     awayScore:x.awayScore,
-    text:titleizePlay(x.text),
-    type:x.type||"",
-    tag:x.tag||""
+    text:titleizePlay(x.text)
   }));
 }
 
@@ -692,76 +687,6 @@ function inferStakesNote(ctxS){
   return "";
 }
 
-// Build quarter-by-quarter scoring narrative from WP series
-function buildQuarterNarrative(wpSeries, homeTeam, awayTeam){
-  if(!wpSeries || wpSeries.length<10) return [];
-  const quarters=[];
-  for(let q=1;q<=4;q++){
-    const qPlays=wpSeries.filter(s=>s.period===q);
-    if(!qPlays.length) continue;
-    const startWP=qPlays[0].wp;
-    const endWP=qPlays[qPlays.length-1].wp;
-    const shift=endWP-startWP;
-    const startScore=qPlays[0];
-    const endScore=qPlays[qPlays.length-1];
-    const bigSwing=qPlays.reduce((mx,s)=>Math.abs(s.delta)>Math.abs(mx.delta)?s:mx,{delta:0});
-    quarters.push({q,startWP,endWP,shift,
-      startHS:startScore.homeScore,startAS:startScore.awayScore,
-      endHS:endScore.homeScore,endAS:endScore.awayScore,
-      bigSwing:bigSwing.absDelta>0.03?bigSwing:null});
-  }
-  // OT
-  const otPlays=wpSeries.filter(s=>s.period>4);
-  if(otPlays.length>2){
-    const startWP=otPlays[0].wp;
-    const endWP=otPlays[otPlays.length-1].wp;
-    quarters.push({q:5,startWP,endWP,shift:endWP-startWP,
-      startHS:otPlays[0].homeScore,startAS:otPlays[0].awayScore,
-      endHS:otPlays[otPlays.length-1].homeScore,endAS:otPlays[otPlays.length-1].awayScore,
-      bigSwing:null});
-  }
-  return quarters;
-}
-
-// Build richer top leverage plays with team attribution
-function enrichTopPlays(topLev, homeTeam, awayTeam, homeId){
-  return topLev.map(tp=>{
-    const favoredHome=tp.delta>=0;
-    const beneficiary=favoredHome?tn(homeTeam):tn(awayTeam);
-    const victim=favoredHome?tn(awayTeam):tn(homeTeam);
-    const per=tp.period<=4?`Q${tp.period}`:"OT";
-    const wpPct=Math.round(tp.wp*100);
-    const swingPct=Math.round(tp.absDelta*100);
-    return {...tp, beneficiary, victim, perLabel:per, wpPct, swingPct};
-  });
-}
-
-// Extract scoring plays from drives for narrative color
-function extractScoringPlays(d){
-  const drives=d?.drives?.previous||[];
-  const scores=[];
-  for(const dr of drives){
-    const team=dr?.team?.abbreviation||"";
-    const result=(dr.displayResult||dr.result||"").toLowerCase();
-    if(result.includes("touchdown")||result.includes("field goal")){
-      const plays=dr.plays||[];
-      const last=plays[plays.length-1];
-      if(last){
-        scores.push({
-          team,
-          type:result.includes("touchdown")?"TD":"FG",
-          text:normSpace(last.text||last.shortText||""),
-          period:last.period?.number||0,
-          clock:last.clock?.displayValue||"",
-          homeScore:last.homeScore,
-          awayScore:last.awayScore
-        });
-      }
-    }
-  }
-  return scores;
-}
-
 export function buildSummaryData(g,d,exc){
   const homeId=getHomeTeamId(d);
   const {series:wpSeries, stats:wpStats} = computeWPSeries(d);
@@ -772,28 +697,19 @@ export function buildSummaryData(g,d,exc){
   const pStats=buildPlayerStats(d);
 
   const leaders=[];
-  for(const p of(pStats.passing||[]))leaders.push({name:p.name,team:p.team,line:`${p["C/ATT"]||"?"} for ${p.YDS||0} yards, ${p.TD||0} TD, ${p.INT||0} INT`,type:"passing",yds:+(p.YDS||0),td:+(p.TD||0)});
-  for(const p of(pStats.rushing||[]).slice(0,2))leaders.push({name:p.name,team:p.team,line:`${p.CAR||"?"} carries, ${p.YDS||0} yards, ${p.TD||0} TD`,type:"rushing",yds:+(p.YDS||0),td:+(p.TD||0)});
-  for(const p of(pStats.receiving||[]).slice(0,3))leaders.push({name:p.name,team:p.team,line:`${p.REC||"?"} catches, ${p.YDS||0} yards, ${p.TD||0} TD`,type:"receiving",yds:+(p.YDS||0),td:+(p.TD||0)});
+  for(const p of(pStats.passing||[]))leaders.push(`${p.name} (${p.team}): ${p["C/ATT"]||"?"}, ${p.YDS||0} yds, ${p.TD||0} TD, ${p.INT||0} INT`);
+  for(const p of(pStats.rushing||[]).slice(0,2))leaders.push(`${p.name} (${p.team}): ${p.CAR||"?"} carries, ${p.YDS||0} yds, ${p.TD||0} TD`);
+  for(const p of(pStats.receiving||[]).slice(0,3))leaders.push(`${p.name} (${p.team}): ${p.REC||"?"} catches, ${p.YDS||0} yds, ${p.TD||0} TD`);
 
-  // Legacy format for backward compat
-  const leaderStrings=leaders.map(l=>`${l.name} (${l.team}): ${l.line}`);
-
-  const enrichedPlays = enrichTopPlays(topLev, g.ht, g.at, homeId);
-  const quarterNarr = buildQuarterNarrative(wpSeries, g.ht, g.at);
-  const scoringPlays = extractScoringPlays(d);
-
-  // Compute margin trajectory: who led at end of each quarter
-  const marginByQ=quarterNarr.map(q=>({q:q.q, lead:q.endHS-q.endAS, hs:q.endHS, as:q.endAS}));
-
-  // Max deficit for winner
-  const winner = g.hs>g.as ? "home" : "away";
-  let maxWinnerDeficit=0;
-  for(const s of (wpSeries||[])){
-    const diff=s.homeScore-s.awayScore;
-    if(winner==="home" && diff<0) maxWinnerDeficit=Math.max(maxWinnerDeficit, Math.abs(diff));
-    if(winner==="away" && diff>0) maxWinnerDeficit=Math.max(maxWinnerDeficit, diff);
-  }
+  const turningPoints = topLev.slice(0,3).map(tp=>{
+    const per = tp.period<=4 ? `Q${tp.period}` : "OT";
+    const sign = tp.delta>=0 ? "boosted" : "punched";
+    const who = tp.delta>=0 ? tn(g.ht) : tn(g.at);
+    return {
+      line:`${per} ${tp.clock}: ${tp.text} — it ${sign} ${who}'s chances.`,
+      why:`|ΔWP|=${tp.absDelta.toFixed(2)}`
+    };
+  });
 
   const ctxR = exc?.scores?.contextR;
   const ctxS = exc?.scores?.contextS;
@@ -801,72 +717,20 @@ export function buildSummaryData(g,d,exc){
   const rivalryNote = inferRivalryNote(ctxR);
   const stakesNote  = inferStakesNote(ctxS);
 
-  // Did the game have OT?
-  const hasOT = (wpSeries||[]).some(s=>s.period>4);
-  // Final margin
-  const finalMargin = Math.abs(g.hs-g.as);
-
-  // Playoff round label
-  let playoffRound="";
-  if(g.season?.type===3){
-    const pwk=g.week?.number||0;
-    if(pwk===1)playoffRound="Wild Card";
-    else if(pwk===2)playoffRound="Wild Card";
-    else if(pwk===3)playoffRound="Divisional Round";
-    else if(pwk===4)playoffRound="Conference Championship";
-    else if(pwk===5)playoffRound="Super Bowl";
-  }
-
-  // Extract notable non-scoring plays: turnovers, 4th down conversions, big gains
-  const allPlays=getAllPlays(d);
-  const notablePlays=[];
-  for(const p of allPlays){
-    const txt=normSpace(p.text||p.shortText||"");
-    const lo=txt.toLowerCase();
-    const ty=(p.type?.text||"").toLowerCase();
-    const yds=p.statYardage||0;
-    const per=p.period?.number||0;
-    const clk=p.clock?.displayValue||"";
-    const team=p.team?.abbreviation||p._driveTeamId||"";
-    if(lo.includes("intercept")||ty.includes("interception")){
-      notablePlays.push({type:"INT",text:txt,period:per,clock:clk,team,yds});
-    } else if(lo.includes("fumble")&&(lo.includes("recovered by")||lo.includes("forced by"))){
-      notablePlays.push({type:"FUM",text:txt,period:per,clock:clk,team,yds});
-    } else if(lo.includes("4th")&&(lo.includes("pass complete")||lo.includes("rush "))){
-      notablePlays.push({type:"4TH",text:txt,period:per,clock:clk,team,yds});
-    } else if(yds>=40&&!lo.includes("punt")&&!lo.includes("kickoff")){
-      notablePlays.push({type:"BIG",text:txt,period:per,clock:clk,team,yds});
-    }
-  }
-
   return{
     matchup:`${tn(g.at)} at ${tn(g.ht)}`,
     awayTeam:g.at,homeTeam:g.ht,
-    awayName:tn(g.at),homeName:tn(g.ht),
-    winnerName: g.hs>g.as ? tn(g.ht) : tn(g.at),
-    loserName: g.hs>g.as ? tn(g.at) : tn(g.ht),
-    winnerAbbr: g.hs>g.as ? g.ht : g.at,
-    loserAbbr: g.hs>g.as ? g.at : g.ht,
     finalScore:`${tn(g.at)} ${g.as}, ${tn(g.ht)} ${g.hs}`,
     awayScore:g.as, homeScore:g.hs,
     awayRecord:g.ar,homeRecord:g.hr,
-    finalMargin,
-    maxWinnerDeficit,
-    hasOT,
     date:new Date(g.date).toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'}),
     venue:g.ven,attendance:g.att,
     context:g.season?.type===3?"Playoff game":`${g.season?.year} Season, Week ${g.week?.number}`,
     boxScore:box.map(r=>`${r.team}: ${r.qs.join(" | ")} = ${r.total}`).join("\n"),
-    playerLeaders:leaderStrings,
-    leaders,
+    playerLeaders:leaders,
     archetype,
     topLeveragePlays: topLev,
-    enrichedPlays,
-    quarterNarrative: quarterNarr,
-    marginByQ,
-    scoringPlays,
-    notablePlays,
-    playoffRound,
+    turningPoints,
     rivalryNote,
     stakesNote,
     wpStats,
