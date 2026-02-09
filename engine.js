@@ -456,96 +456,12 @@ export function playTag(text,type){
 
 function computeWPSeries(d){
   const homeId=getHomeTeamId(d);
-
-  // ── Strategy: prefer ESPN's own WP data, fall back to our model ──
-  const espnWP = d?.winprobability || d?.winProbability || [];
-
-  if(espnWP.length >= 10){
-    return computeWPFromESPN(espnWP, d, homeId);
-  }
-
-  // Fallback to play-by-play model
-  return computeWPFromPlays(d, homeId);
-}
-
-// Use ESPN's official win probability data
-function computeWPFromESPN(espnWP, d, homeId){
-  const series=[];
-  const allPlays=getAllPlays(d);
-  const playMap=new Map();
-  for(const p of allPlays){
-    if(p.id) playMap.set(String(p.id), p);
-  }
-
-  let prevWp=0.5;
-  let lastScore={homeScore:0, awayScore:0};
-
-  for(const wp of espnWP){
-    const homeWP=wp.homeWinPercentage!=null ? wp.homeWinPercentage : null;
-    if(homeWP==null) continue;
-
-    // Get time info from secondsLeft
-    const secLeft=wp.secondsLeft;
-    let period=null, clock=null, elapsed=null;
-    if(secLeft!=null){
-      if(secLeft>2700){period=1;clock=fmtSec(secLeft-2700);}
-      else if(secLeft>1800){period=2;clock=fmtSec(secLeft-1800);}
-      else if(secLeft>900){period=3;clock=fmtSec(secLeft-900);}
-      else if(secLeft>=0){period=4;clock=fmtSec(secLeft);}
-      else{period=5;clock=fmtSec(Math.max(0,secLeft+600));}
-      elapsed=(3600 - Math.max(secLeft, 0))/60;
-      if(secLeft<0) elapsed=(3600 + Math.abs(secLeft))/60;
-    }
-
-    // Get play text if available
-    const playId=wp.playId?String(wp.playId):null;
-    const play=playId?playMap.get(playId):null;
-    const text=play?normSpace(play.text||play.shortText||play.type?.text||""):"";
-    const type=play?(play.type?.text||""):"";
-
-    // Get scores
-    if(play){
-      const sc=getScoresFromPlay(play, lastScore);
-      if(sc) lastScore=sc;
-    }
-
-    const delta=homeWP-prevWp;
-    const absDelta=Math.abs(delta);
-    prevWp=homeWP;
-
-    series.push({
-      wp:homeWP, delta, absDelta,
-      period:period||1,
-      clock:clock||"",
-      remSec:secLeft!=null?Math.max(0,secLeft):null,
-      tMin:elapsed,
-      text,
-      teamId:play?getPossTeamId(play):null,
-      homeScore:lastScore.homeScore,
-      awayScore:lastScore.awayScore,
-      type,
-      tag:playTag(text, type)
-    });
-  }
-
-  if(series.length<10) return {series, stats:null};
-  return {series, stats: computeWPStats(series)};
-}
-
-function fmtSec(s){
-  const m=Math.floor(s/60);
-  const sec=Math.floor(s%60);
-  return `${m}:${sec<10?"0":""}${sec}`;
-}
-
-// Fallback: compute WP from play-by-play with noise filtering
-function computeWPFromPlays(d, homeId){
   const playsRaw=getAllPlays(d);
   if(!playsRaw.length || !homeId) return {series:[], stats:null};
 
   const plays=sortPlaysChrono(playsRaw);
 
-  // Filter out noise plays that shouldn't affect WP
+  // Plays to skip entirely (they don't affect game state)
   const SKIP_TYPES=new Set([
     "timeout","end period","end of half","end of game","coin toss",
     "two-minute warning","official timeout","tv timeout"
@@ -555,7 +471,6 @@ function computeWPFromPlays(d, homeId){
   let prevWp=0.5;
   const series=[];
   let firstSet=false;
-  let prevScoreKey="0-0";
 
   for(const p of plays){
     const per=p.period?.number||1;
@@ -571,14 +486,10 @@ function computeWPFromPlays(d, homeId){
     const possTeamId=getPossTeamId(p);
     const possIsHome=(possTeamId==null)?null:(possTeamId===homeId);
 
-    if(lastScore==null) continue;
-
-    // For kickoffs/punts, don't attribute possession to the receiving team
-    // to avoid artificial swings. Use null possession.
-    const isKickPunt=typeText.includes("kickoff")||typeText.includes("punt")||
-      typeText.includes("extra point")||typeText.includes("pat")||
+    // For kickoffs/punts/PATs, nullify possession to prevent artificial swings
+    const isNeutral=typeText.includes("kickoff")||typeText.includes("extra point")||
       typeText.includes("two-point");
-    const effectivePoss = isKickPunt ? null : possIsHome;
+    const effectivePoss=isNeutral?null:possIsHome;
 
     const wp=wpHomeFromState({
       homeScore:lastScore.homeScore,
@@ -587,11 +498,7 @@ function computeWPFromPlays(d, homeId){
       period:per,
       clock:clk
     });
-    if(!firstSet){prevWp=wp; firstSet=true;}
-
-    const curScoreKey=`${lastScore.homeScore}-${lastScore.awayScore}`;
-    const scoreChanged = curScoreKey !== prevScoreKey;
-    prevScoreKey=curScoreKey;
+    if(!firstSet){prevWp=wp;firstSet=true;}
 
     const delta=wp-prevWp;
     const absDelta=Math.abs(delta);
@@ -612,8 +519,7 @@ function computeWPFromPlays(d, homeId){
       homeScore:lastScore.homeScore,
       awayScore:lastScore.awayScore,
       type:(p.type?.text||""),
-      tag:playTag(p.text||p.shortText||"", p.type?.text||""),
-      scoreChanged
+      tag:playTag(p.text||p.shortText||"", p.type?.text||"")
     });
   }
 
@@ -621,7 +527,7 @@ function computeWPFromPlays(d, homeId){
   return {series, stats: computeWPStats(series)};
 }
 
-// Compute statistics from WP series (shared between ESPN and fallback)
+// Compute statistics from WP series
 function computeWPStats(series){
   let sumAbs=0, maxAbs=0, sumSq=0, crosses50=0, crosses4060=0, inDoubt=0;
   let lateAbs=0, lateMax=0;
