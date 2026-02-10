@@ -276,32 +276,51 @@ function normSpace(s){return String(s||"").replace(/\s+/g," ").trim();}
 
 export function extractKP(d){
   const plays=getAllPlays(d);
+  const homeId=getHomeTeamId(d);
   const cats=[];
   for(const p of plays){
     const raw=p.text||"";
-    const txt=titleizePlay(raw);
     const lo=raw.toLowerCase();
     const ty=(p.type?.text||"").toLowerCase();
     const y=p.statYardage||0;
     const period=p.period?.number||0;
     const clock=p.clock?.displayValue||"";
+
+    // SKIP plays with "No Play" (penalty nullified)
+    if(lo.includes("no play")||ty.includes("penalty")) continue;
+
     let tag=null;
-    if(lo.includes("intercept")||ty.includes("interception")) tag="TO";
-    else if(lo.includes("fumble")) tag="TO";
-    else if(lo.includes("blocked")&&(lo.includes("punt")||lo.includes("field goal"))) tag="SP";
-    else if(lo.includes("safety")) tag="SP";
-    else if(y>=40) tag="BG";
-    else if(period>=4 && (lo.includes("touchdown")||lo.includes(" td "))) tag="CL";
-    else if(ty.includes("missed field goal")) tag="CL";
-    if(tag) cats.push({tag,text:txt,period,clock});
+    // Scoring plays (TD, FG, safety)
+    if(lo.includes("touchdown")||lo.includes(" td ")||ty.includes("touchdown")) tag="TD";
+    else if(ty.includes("field goal")&&!ty.includes("missed")&&lo.includes("good")) tag="FG";
+    else if(lo.includes("safety")||ty.includes("safety")) tag="SP";
+    // Turnovers
+    else if(lo.includes("intercept")||ty.includes("interception")) tag="TO";
+    else if(lo.includes("fumble")&&(lo.includes("recovered")||lo.includes("forced")||lo.includes("fumbles"))) tag="TO";
+    else if(ty.includes("turnover on downs")) tag="TO";
+    // Blocked kicks
+    else if(lo.includes("blocked")&&(lo.includes("punt")||lo.includes("field goal")||lo.includes("kick"))) tag="SP";
+    // 4th down attempts (success or failure)
+    else if(lo.includes("4th")&&(lo.includes("pass complete")||lo.includes("rush"))) tag="4D";
+    // Missed FG
+    else if(ty.includes("missed field goal")||lo.includes("field goal no good")||lo.includes("missed")) tag="CL";
+    // Big plays (40+ yards, not punts/kicks)
+    else if(y>=40&&!lo.includes("punt")&&!lo.includes("kickoff")) tag="BG";
+
+    if(tag){
+      // Get score after play
+      const hs=p.homeScore!=null?+p.homeScore:null;
+      const as=p.awayScore!=null?+p.awayScore:null;
+      cats.push({tag,text:titleizePlay(raw),period,clock,homeScore:hs,awayScore:as});
+    }
   }
   const uniq=[];const seen=new Set();
   for(const x of cats){
-    const k=x.tag+"|"+x.text+"|"+x.period+"|"+x.clock;
+    const k=x.tag+"|"+x.period+"|"+x.clock+"|"+(x.text||"").slice(0,40);
     if(seen.has(k))continue;
     seen.add(k);uniq.push(x);
   }
-  return uniq.slice(0,12);
+  return uniq.slice(0,20);
 }
 
 // ---------- Context scoring (rivalry / stakes) ----------
@@ -399,23 +418,37 @@ function calcRivalry(g){
 }
 
 // ---------- Win probability model (home team) ----------
+// Calibrated against known NFL WP benchmarks:
+//   Tied at half ≈ 50%, Up 7 at half ≈ 73%, Up 14 at half ≈ 89%
+//   Up 7 with 5min left ≈ 90%, Up 7 with 2min left ≈ 96%
+//   Up 3 at half ≈ 62%, Up 3 with 5min left ≈ 80%
 function wpHomeFromState({homeScore,awayScore,possIsHome,period,clock}){
   const sd=(homeScore||0)-(awayScore||0);
   const rem=gameRemainingSec(period,clock);
-  const remSafe=(rem==null)?1800:rem;
+  const remSafe=(rem==null)?1800:Math.max(rem,1);
 
-  const lateFactor=clamp(1 + (3600 - clamp(remSafe,0,3600))/1800, 1, 3);
+  // Time factor: score matters more as game progresses
+  // Use inverse-sqrt scaling — gentle early, steep late
+  // At 3600s left (game start): factor ≈ 1.0
+  // At 1800s left (halftime): factor ≈ 1.41
+  // At 300s left (5 min Q4): factor ≈ 3.46
+  // At 120s left (2 min Q4): factor ≈ 5.48
+  const timeFactor = Math.sqrt(3600 / remSafe);
 
+  // Base coefficient: tuned so up-7-at-halftime ≈ 73%
+  // 0.10 * 7 * 1.41 = 0.99 → sigmoid(0.99) = 0.729 ✓
+  const scoreCoeff = 0.10;
+
+  // Possession bump: worth ~3% at midgame, ~6% late
   const poss = possIsHome==null ? 0 : (possIsHome ? 1 : -1);
+  const possCoeff = 0.15;
 
-  // Possession bump: ~3-4% WP at sigmoid midpoint, realistic for NFL.
-  // Previous value (0.70) caused ~17% swings on kickoffs which is wrong.
-  let x = 0.18*sd*lateFactor + 0.25*poss;
+  let x = scoreCoeff * sd * timeFactor + possCoeff * poss;
 
-  if(remSafe!=null && remSafe<=120 && period<=4 && sd!==0){
-    const tight = clamp(Math.abs(sd)/8, 0, 1);
-    const urgency = clamp((120-remSafe)/120, 0, 1);
-    x += Math.sign(sd) * 1.2 * tight * urgency;
+  // 2-minute drill urgency: trailing team's WP drops faster
+  if(remSafe <= 120 && period <= 4 && sd !== 0){
+    const urgency = clamp((120 - remSafe) / 120, 0, 1);
+    x += Math.sign(sd) * 0.5 * urgency;
   }
 
   return clamp(sigmoid(x), 0.01, 0.99);
