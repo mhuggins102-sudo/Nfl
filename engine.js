@@ -273,10 +273,14 @@ export function getAllPlays(d){
   return arr;
 }
 function normSpace(s){return String(s||"").replace(/\s+/g," ").trim();}
+function isNoPlay(p){
+  const t=(p?.text||p?.shortText||"").toLowerCase();
+  return t.includes("no play");
+}
+
 
 export function extractKP(d){
   const plays=getAllPlays(d);
-  const homeId=getHomeTeamId(d);
   const cats=[];
   for(const p of plays){
     const raw=p.text||"";
@@ -286,32 +290,33 @@ export function extractKP(d){
     const period=p.period?.number||0;
     const clock=p.clock?.displayValue||"";
 
-    // SKIP plays with "No Play" (penalty nullified)
-    if(lo.includes("no play")||ty.includes("penalty")) continue;
+    // Skip penalty-nullified snaps
+    if(isNoPlay(p)) continue;
+    // Skip PAT / XP / 2PT tries in key-plays list
+    if(ty.includes("extra point")||ty.includes("two-point")||lo.includes("extra point")||lo.includes("two-point")) continue;
 
     let tag=null;
     // Scoring plays (TD, FG, safety)
-    if(lo.includes("touchdown")||lo.includes(" td ")||ty.includes("touchdown")) tag="TD";
-    else if(ty.includes("field goal")&&!ty.includes("missed")&&lo.includes("good")) tag="FG";
-    else if(lo.includes("safety")||ty.includes("safety")) tag="SP";
+    if((p.scoringPlay && (ty.includes("touchdown")||lo.includes("touchdown"))) || ty.includes("touchdown")||lo.includes("touchdown")) tag="TD";
+    else if((p.scoringPlay && ty.includes("field goal good")) || (ty.includes("field goal")&&!ty.includes("missed")&&lo.includes("field goal"))) tag="FG";
+    else if((p.scoringPlay && (ty.includes("safety")||lo.includes("safety"))) || ty.includes("safety")||lo.includes("safety")) tag="SP";
     // Turnovers
-    else if(lo.includes("intercept")||ty.includes("interception")) tag="TO";
+    else if(lo.includes("intercept")||ty.includes("interception")||p.isTurnover) tag="TO";
     else if(lo.includes("fumble")&&(lo.includes("recovered")||lo.includes("forced")||lo.includes("fumbles"))) tag="TO";
-    else if(ty.includes("turnover on downs")) tag="TO";
+    else if(ty.includes("turnover on downs")||lo.includes("turnover on downs")) tag="TO";
     // Blocked kicks
     else if(lo.includes("blocked")&&(lo.includes("punt")||lo.includes("field goal")||lo.includes("kick"))) tag="SP";
-    // 4th down attempts (success or failure)
-    else if(lo.includes("4th")&&(lo.includes("pass complete")||lo.includes("rush"))) tag="4D";
+    // All 4th-down attempts (success or failure) except punts/FGs
+    else if(lo.includes("4th") && !lo.includes("punt") && !lo.includes("field goal") && !ty.includes("punt") && !ty.includes("field goal")) tag="4D";
     // Missed FG
-    else if(ty.includes("missed field goal")||lo.includes("field goal no good")||lo.includes("missed")) tag="CL";
+    else if(ty.includes("missed field goal")||lo.includes("field goal no good")||lo.includes("missed field goal")) tag="CL";
     // Big plays (40+ yards, not punts/kicks)
     else if(y>=40&&!lo.includes("punt")&&!lo.includes("kickoff")) tag="BG";
 
     if(tag){
-      // Get score after play
       const hs=p.homeScore!=null?+p.homeScore:null;
       const as=p.awayScore!=null?+p.awayScore:null;
-      cats.push({tag,text:titleizePlay(raw),period,clock,homeScore:hs,awayScore:as});
+      cats.push({tag,text:titleizePlay(raw),period,clock,homeScore:hs,awayScore:as,playId:String(p.id||"")});
     }
   }
   const uniq=[];const seen=new Set();
@@ -320,7 +325,7 @@ export function extractKP(d){
     if(seen.has(k))continue;
     seen.add(k);uniq.push(x);
   }
-  return uniq.slice(0,20);
+  return uniq.slice(0,25);
 }
 
 // ---------- Context scoring (rivalry / stakes) ----------
@@ -478,86 +483,86 @@ function sortPlaysChrono(plays){
 export function playTag(text,type){
   const lo=(text||"").toLowerCase();
   const ty=(type||"").toLowerCase();
+  if(ty.includes("extra point")||lo.includes("extra point")||ty.includes("two-point")||lo.includes("two-point")) return "";
   if(lo.includes("intercept")||ty.includes("interception")) return "TO";
   if(lo.includes("fumble")) return "TO";
   if(lo.includes("turnover on downs")||ty.includes("turnover on downs")) return "TO";
-  if(lo.includes("blocked")&&(lo.includes("punt")||lo.includes("field goal"))) return "SP";
+  if(ty.includes("field goal good")|| (ty.includes("field goal") && lo.includes("field goal" ) && lo.includes("good"))) return "FG";
+  if(lo.includes("blocked")&&(lo.includes("punt")||lo.includes("field goal")||lo.includes("kick"))) return "SP";
   if(lo.includes("safety")||ty.includes("safety")) return "SP";
-  if(ty.includes("missed field goal")||lo.includes("missed")) return "CL";
+  if(ty.includes("missed field goal")||lo.includes("field goal no good")||lo.includes("missed field goal")) return "CL";
   return "";
 }
 
 function computeWPSeries(d){
-  const homeId=getHomeTeamId(d);
-  const playsRaw=getAllPlays(d);
-  if(!playsRaw.length || !homeId) return {series:[], stats:null};
+  const plays = sortPlaysChrono(getAllPlays(d)).filter(p=>!isNoPlay(p));
+  const homeId = getHomeTeamId(d);
 
-  const plays=sortPlaysChrono(playsRaw);
+  // ESPN sometimes provides play-level win probability in the summary payload.
+  // If present, prefer it; otherwise fall back to our lightweight heuristic.
+  const wpMap = new Map();
+  for(const w of (d?.winprobability||[])){
+    if(w?.playId!=null && w?.homeWinPercentage!=null){
+      wpMap.set(String(w.playId), clamp(+w.homeWinPercentage, 0.01, 0.99));
+    }
+  }
 
-  // Plays to skip entirely (they don't affect game state)
-  const SKIP_TYPES=new Set([
-    "timeout","end period","end of half","end of game","coin toss",
-    "two-minute warning","official timeout","tv timeout"
-  ]);
-
-  let lastScore={homeScore:0,awayScore:0};
-  let prevWp=0.5;
+  let lastScores={homeScore:0,awayScore:0};
   const series=[];
-  let firstSet=false;
-
   for(const p of plays){
-    const per=p.period?.number||1;
-    const clk=p.clock?.displayValue||p.clock?.value||p.clock;
-    const typeText=(p.type?.text||"").toLowerCase();
-
-    // Skip non-game events
-    if(SKIP_TYPES.has(typeText)) continue;
-
-    const sc=getScoresFromPlay(p,lastScore);
-    if(sc) lastScore=sc;
-
+    lastScores=getScoresFromPlay(p,lastScores);
+    const period=p.period?.number||1;
+    const clock=p.clock?.displayValue||p.clock?.value||p.clock;
     const possTeamId=getPossTeamId(p);
-    const possIsHome=(possTeamId==null)?null:(possTeamId===homeId);
+    const possIsHome = possTeamId==null ? null : String(possTeamId)===String(homeId);
 
-    // For kickoffs/punts/PATs, nullify possession to prevent artificial swings
-    const isNeutral=typeText.includes("kickoff")||typeText.includes("extra point")||
-      typeText.includes("two-point");
-    const effectivePoss=isNeutral?null:possIsHome;
-
-    const wp=wpHomeFromState({
-      homeScore:lastScore.homeScore,
-      awayScore:lastScore.awayScore,
-      possIsHome:effectivePoss,
-      period:per,
-      clock:clk
-    });
-    if(!firstSet){prevWp=wp;firstSet=true;}
-
-    const delta=wp-prevWp;
-    const absDelta=Math.abs(delta);
-    prevWp=wp;
-
-    const rem=gameRemainingSec(per, clk);
-    const elapsed=gameElapsedSec(per, clk);
-    const text=normSpace(p.text||p.shortText||p.type?.text||"");
+    // Prefer ESPN WP when available for this play id.
+    let wp = wpMap.get(String(p.id));
+    if(wp==null){
+      wp = wpHomeFromState({
+        homeScore:lastScores.homeScore,
+        awayScore:lastScores.awayScore,
+        possIsHome,
+        period,
+        clock
+      });
+    }
 
     series.push({
-      wp, delta, absDelta,
-      period:per,
-      clock:clk,
-      remSec:rem,
-      tMin:(elapsed!=null?elapsed/60:null),
-      text,
-      teamId:possTeamId,
-      homeScore:lastScore.homeScore,
-      awayScore:lastScore.awayScore,
-      type:(p.type?.text||""),
-      tag:playTag(p.text||p.shortText||"", p.type?.text||"")
+      id:String(p.id),
+      period,
+      clock:String(clock||""),
+      homeScore:lastScores.homeScore,
+      awayScore:lastScores.awayScore,
+      possIsHome,
+      wp,
+      text:normSpace(p.text||p.shortText||""),
+      type:p.type||{}
     });
   }
 
-  if(series.length<10) return {series, stats:null};
-  return {series, stats: computeWPStats(series)};
+  // Compute aggregate stats
+  let sumAbs=0, maxAbs=0, crosses50=0, crosses40_60=0, clutchAbs=0, doubtCount=0;
+  for(let i=1;i<series.length;i++){
+    const a=series[i-1], b=series[i];
+    const dwp=b.wp-a.wp;
+    const ad=Math.abs(dwp);
+    sumAbs+=ad; maxAbs=Math.max(maxAbs,ad);
+    if((a.wp<0.5 && b.wp>=0.5)||(a.wp>=0.5 && b.wp<0.5)) crosses50++;
+    if((a.wp<0.4 && b.wp>=0.6)||(a.wp>0.6 && b.wp<=0.4)) crosses40_60++;
+    const rem=gameRemainingSec(b.period,b.clock);
+    if(rem!=null && b.period<=4 && rem<=480) clutchAbs+=ad;
+    if(b.wp>=0.2 && b.wp<=0.8) doubtCount++;
+  }
+  const doubtFrac = series.length? (doubtCount/series.length) : 0;
+  const stats={sumAbsDelta:sumAbs, maxAbsDelta:maxAbs, crosses50, crosses40_60, clutchAbsDelta:clutchAbs, doubtFrac, n:series.length};
+
+  // Also annotate each point with delta fields for downstream UI
+  for(let i=1;i<series.length;i++){
+    const a=series[i-1], b=series[i];
+    b.delta=b.wp-a.wp; b.absDelta=Math.abs(b.delta);
+  }
+  return {series, stats};
 }
 
 // Compute statistics from WP series
@@ -828,21 +833,35 @@ function extractScoringPlays(d){
   for(const dr of drives){
     const team=dr?.team?.abbreviation||"";
     const result=(dr.displayResult||dr.result||"").toLowerCase();
-    if(result.includes("touchdown")||result.includes("field goal")){
-      const plays=dr.plays||[];
-      const last=plays[plays.length-1];
-      if(last){
-        scores.push({
-          team,
-          type:result.includes("touchdown")?"TD":"FG",
-          text:normSpace(last.text||last.shortText||""),
-          period:last.period?.number||0,
-          clock:last.clock?.displayValue||"",
-          homeScore:last.homeScore,
-          awayScore:last.awayScore
-        });
-      }
+    if(!(result.includes("touchdown")||result.includes("field goal")||result.includes("safety"))) continue;
+    const plays=(dr.plays||[]).filter(p=>!isNoPlay(p));
+    if(!plays.length) continue;
+
+    let pick=null;
+    if(result.includes("touchdown")){
+      // Prefer the actual TD play, not the extra point attempt.
+      pick = [...plays].reverse().find(p=>p.scoringPlay && ((p.type?.text||"").toLowerCase().includes("touchdown") || (p.text||"").toLowerCase().includes("touchdown")));
+      if(!pick) pick = [...plays].reverse().find(p=>((p.type?.text||"").toLowerCase().includes("touchdown") || (p.text||"").toLowerCase().includes("touchdown")));
+    } else if(result.includes("field goal")){
+      pick = [...plays].reverse().find(p=>p.scoringPlay && ((p.type?.text||"").toLowerCase().includes("field goal good") || (p.text||"").toLowerCase().includes("field goal")));
+      if(!pick) pick = [...plays].reverse().find(p=>((p.type?.text||"").toLowerCase().includes("field goal good")));
+    } else if(result.includes("safety")){
+      pick = [...plays].reverse().find(p=>p.scoringPlay && ((p.type?.text||"").toLowerCase().includes("safety") || (p.text||"").toLowerCase().includes("safety")));
+      if(!pick) pick = [...plays].reverse().find(p=>((p.type?.text||"").toLowerCase().includes("safety") || (p.text||"").toLowerCase().includes("safety")));
     }
+    if(!pick) pick = plays[plays.length-1];
+
+    let type = result.includes("touchdown") ? "TD" : (result.includes("field goal") ? "FG" : "SP");
+    scores.push({
+      team,
+      type,
+      text:normSpace(pick.text||pick.shortText||""),
+      period:pick.period?.number||0,
+      clock:pick.clock?.displayValue||"",
+      homeScore:pick.homeScore,
+      awayScore:pick.awayScore,
+      playId:String(pick.id||"")
+    });
   }
   return scores;
 }

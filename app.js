@@ -48,8 +48,8 @@ function _humanizePlay(raw){
   // "pass short middle to" → "pass to"
   s=s.replace(/pass\s+(short|deep)\s+(left|right|middle)\s+to/gi, "pass to");
   // "pushed ob at MIN 25 for 14 yards" → "for 14 yards to the 25"
-  s=s.replace(/pushed ob at [A-Z]{2,4}\s+(\d+)/g, "to the $1");
-  s=s.replace(/ran ob at [A-Z]{2,4}\s+(\d+)/g, "to the $1");
+  s=s.replace(/pushed ob at ([A-Z]{2,4}\s+\d+)/g, "to $1");
+  s=s.replace(/ran ob at ([A-Z]{2,4}\s+\d+)/g, "to $1");
   // "to DET 25 for 14 yards" → "for 14 yards to the 25-yard line"  
   s=s.replace(/to [A-Z]{2,4}\s+(\d+)/g, "to the $1");
   // ", TOUCHDOWN" → " for a touchdown"
@@ -138,142 +138,126 @@ function _describePlay(raw, ctx){
 function _pick(arr,seed){if(!arr.length)return"";return arr[Math.abs(seed)%arr.length];}
 function _qLabel(p){return p<=4?`Q${p}`:"OT";}
 
+
 function buildRecap(sum){
   if(!sum) return null;
 
   const homeAb=sum.homeTeam, awayAb=sum.awayTeam;
   const homeN=sum.homeName, awayN=sum.awayName;
-  const hs=sum.homeScore, as=sum.awayScore;
+  const hs=+sum.homeScore, as=+sum.awayScore;
+
   const winnerIsHome = hs>as;
   const W = winnerIsHome ? homeN : awayN;
   const L = winnerIsHome ? awayN : homeN;
   const winScore = Math.max(hs,as);
   const loseScore = Math.min(hs,as);
+
   const hasOT = !!sum.hasOT;
   const pRound = sum.playoffRound||"";
   const ctxPre = pRound ? (pRound==="Super Bowl" ? "In the Super Bowl, " : `In the ${pRound}, `) : "";
 
-  const scoring = _sortByGameTimeDesc(sum.scoringPlays||[]);
-  const notable = _sortByGameTimeDesc(sum.notablePlays||[]);
-  const topSwings = [...(sum.enrichedPlays||[])]
-    .filter(p=>p?.text && !/no play/i.test(p.text))
-    .sort((a,b)=>(b.absDelta||0)-(a.absDelta||0))
-    .slice(0,3)
-    .map(p=>({...p, text:_humanizePlay(p.text)}))
-    .filter(p=>p.text);
+  const scoringChron = _sortByGameTimeDesc(sum.scoringPlays||[]).reverse()
+    .filter(p=>p && (p.type==="TD"||p.type==="FG"||p.type==="SP") && !_ns(p.text).toLowerCase().includes("extra point"));
 
-  const leadChanges = _leadChangesFromScoring(sum.scoringPlays||[], homeAb, awayAb);
+  const notableChron = _sortByGameTimeDesc(sum.notablePlays||[]).reverse()
+    .filter(p=>p && p.text && !/no play/i.test(p.text));
+
+  const leadChanges = _leadChangesFromScoring(scoringChron, homeAb, awayAb);
   const lastLeadChange = leadChanges.length ? leadChanges[leadChanges.length-1].at : null;
 
-  // Late scoring (final 2:00 of regulation)
-  const lateScores = scoring.filter(p=>{
+  // Late scoring in regulation (final 2:00)
+  const lateScores = scoringChron.filter(p=>{
     const r=_remSec(p.period,p.clock);
-    return r!=null && r<=120 && (p.period<=4);
+    return r!=null && p.period<=4 && r<=120;
   });
   const latePoints = lateScores.reduce((acc,p,idx)=>{
-    const prev = idx===0 ? null : lateScores[idx-1];
-    if(!prev) return acc + (p.homeScore+p.awayScore); // rough; replaced below
-    return acc;
+    const prev = idx===0 ? {homeScore:0,awayScore:0} : lateScores[idx-1];
+    return acc + _pointsDelta(prev,p);
   },0);
 
+  // Helper: pick the best “story” plays without talking about WP numbers.
+  const topStoryPlays = [...(sum.enrichedPlays||[])]
+    .filter(p=>p?.text && !/no play/i.test(p.text))
+    .sort((a,b)=>(b.absDelta||0)-(a.absDelta||0))
+    .slice(0,3);
+
+  const perf = (sum.performanceNotes||[]).slice(0,2);
+  const standoutLine = perf.find(x=>x.note==="dominant"||x.note==="standout");
+  const struggledLine = perf.find(x=>x.note==="struggled");
+
+  // Build narrative paragraphs
   const paras=[];
 
-  // ── Lede ──
-  let lede = `${ctxPre}${W} beat ${L} ${winScore}-${loseScore}${hasOT?" in overtime":""}.`;
-  const arche = sum.archetype?.type||"";
-  if(arche==="wire" && (sum.finalMargin||0)>=14){
-    lede += " It was largely one-way traffic.";
-  } else if(arche==="seesaw" && leadChanges.length){
-    lede += ` The lead changed hands ${leadChanges.length} time${leadChanges.length===1?"":"s"} on the scoring timeline.`;
-  } else if(arche==="comeback" && (sum.maxWinnerDeficit||0)>=10){
-    lede += ` ${W} erased a ${sum.maxWinnerDeficit}-point deficit.`;
-  } else if((sum.finalMargin||0)<=3){
-    lede += " It came down to the final possessions.";
+  // 1) Lede (result + thesis)
+  let thesis="";
+  const margin=Math.abs(hs-as);
+  if(margin>=21){
+    thesis = "It was never truly in doubt.";
+  } else if(hasOT){
+    thesis = "It took overtime to separate them.";
+  } else if(latePoints>=21){
+    thesis = "The final two minutes turned into a track meet.";
+  } else if(leadChanges.length>=3){
+    thesis = "The lead changed hands repeatedly down the stretch.";
+  } else {
+    thesis = "A handful of high-leverage moments decided it.";
   }
-  paras.push(lede);
+  paras.push(`${ctxPre}${W} beat ${L} ${winScore}-${loseScore}${hasOT?" in overtime":""}. ${thesis}`);
 
-  // ── Turning points / game story ──
-  // Prefer: (1) last lead change score, (2) top swing play, (3) early game breaker for blowouts
-  const storyBits=[];
+  // 2) Early/mid-game flow (use quarter endpoints + early scores when available)
+  const q = sum.quarterNarrative||[];
+  const end2 = q.find(x=>x.q===2);
+  const end3 = q.find(x=>x.q===3);
+  const firstScore = scoringChron[0];
+  if(firstScore){
+    const who = firstScore.team ? firstScore.team : _leadSide(firstScore,homeAb,awayAb);
+    const px = _humanizePlay(firstScore.text);
+    paras.push(`${who} struck first on ${px} (${firstScore.period>=5?"OT":`Q${firstScore.period}`} ${firstScore.clock}), setting the tone early. ${end2?`By halftime it was ${end2.endAS}-${end2.endHS}.`:""}`);
+  } else if(end2){
+    paras.push(`By halftime it was ${end2.endAS}-${end2.endHS}, and the shape of the game was already clear.`);
+  }
+
+  // 3) Turning point (last lead change or biggest “story play”)
   if(lastLeadChange){
-    storyBits.push(`The decisive turn came on ${_describePlay(_humanizePlay(lastLeadChange.text),{
-      period:lastLeadChange.period, clock:lastLeadChange.clock,
-      homeScore:lastLeadChange.homeScore, awayScore:lastLeadChange.awayScore,
-      homeName:homeN, awayName:awayN
-    })}, making it ${_scoreAfter(lastLeadChange)}.`);
+    const px=_humanizePlay(lastLeadChange.text);
+    paras.push(`The swing moment came when ${px} (${lastLeadChange.period>=5?"OT":`Q${lastLeadChange.period}`} ${lastLeadChange.clock}), pushing the score to ${lastLeadChange.awayScore}-${lastLeadChange.homeScore}.`);
+  } else if(topStoryPlays[0]){
+    const p=topStoryPlays[0];
+    const px=_humanizePlay(p.text);
+    paras.push(`The game pivoted on ${px} (${p.period>=5?"OT":`Q${p.period}`} ${p.clock}), a sequence that flipped control.`);
   }
 
-  // Add up to two high-leverage plays not already captured by the last lead change
-  for(const p of topSwings){
-    if(lastLeadChange && p.period===lastLeadChange.period && p.clock===lastLeadChange.clock) continue;
-    const swingPct = Math.round((p.absDelta||0)*100);
-    const desc=_describePlay(p.text,{
-      period:p.period, clock:p.clock,
-      homeScore:p.homeScore, awayScore:p.awayScore,
-      homeName:homeN, awayName:awayN
-    });
-    if(desc) storyBits.push(`The biggest swing on the chart was about ${swingPct}% on ${desc}.`);
-    if(storyBits.length>=3) break;
-  }
-
-  // Blowout-specific: look for defensive scores / early turnovers
-  if((sum.finalMargin||0)>=21){
-    const defTD = scoring.find(p=>/return|intercept|fumble/i.test(p.text||"")) || notable.find(p=>p.type==="INT"||p.type==="FUM");
-    if(defTD && storyBits.length<3){
-      const dsc = defTD.text ? _describePlay(_humanizePlay(defTD.text),{
-        period:defTD.period, clock:defTD.clock,
-        homeScore:defTD.homeScore, awayScore:defTD.awayScore,
-        homeName:homeN, awayName:awayN
-      }) : null;
-      if(dsc) storyBits.push(`That was the moment the game broke open: ${dsc}.`);
-    }
-  }
-
-  if(storyBits.length){
-    paras.push(storyBits.join(" "));
-  }
-
-  // ── Finish ──
-  const finishBits=[];
-  if(lateScores.length>=2){
-    // Points scored in the final 2:00 of regulation, computed from scoring deltas
-    const allChron=_sortByGameTimeDesc(scoring).reverse(); // chronological
-    let pts=0;
-    for(let i=0;i<allChron.length;i++){
-      const p=allChron[i];
-      const r=_remSec(p.period,p.clock);
-      if(r!=null && r<=120 && p.period<=4){
-        const prev = i>0 ? allChron[i-1] : {homeScore:0,awayScore:0};
-        pts += _pointsDelta(prev,p);
-      }
-    }
-    finishBits.push(`There were ${pts} points scored in the final two minutes of regulation.`);
-  }
-
+  // 4) Finish (late sequence / OT resolution)
   if(hasOT){
-    // Try to reference OT winner play if present in scoring (often will be last TD/FG in OT)
-    const otScore = _sortByGameTimeDesc(scoring).reverse().find(p=>p.period>4);
+    // Find the last score in OT, else last score overall
+    const otScore = [...scoringChron].reverse().find(p=>p.period>4) || scoringChron[scoringChron.length-1];
     if(otScore){
-      const od=_describePlay(_humanizePlay(otScore.text),{
-        period:otScore.period, clock:otScore.clock,
-        homeScore:otScore.homeScore, awayScore:otScore.awayScore,
-        homeName:homeN, awayName:awayN
-      });
-      if(od) finishBits.push(`Overtime ended on ${od}.`);
+      paras.push(`In overtime, it ended on ${_humanizePlay(otScore.text)} to finish it.`);
     } else {
-      finishBits.push("It ended in overtime.");
+      paras.push(`In overtime, ${W} finally found the deciding score.`);
     }
-  } else if((sum.finalMargin||0)>=21){
-    finishBits.push(`${W} was able to manage the second half without drama.`);
-  } else if(lastLeadChange){
-    finishBits.push(`After that final swing, ${L} couldn’t answer on the remaining possessions.`);
+  } else if(lateScores.length>=2){
+    const lastFew = lateScores.slice(-3);
+    const bits = lastFew.map(p=>`${_humanizePlay(p.text)} (${p.period>=5?"OT":`Q${p.period}`} ${p.clock})`);
+    paras.push(`Then came the chaos: ${bits.join("; ")}.`);
+  } else if(end3 && margin<=10){
+    paras.push(`It stayed close into the fourth after ${end3.endAS}-${end3.endHS} through three.`);
   }
 
-  if(finishBits.length) paras.push(finishBits.join(" "));
+  // 5) Standouts (one sentence)
+  if(standoutLine){
+    paras.push(`${standoutLine.name} (${standoutLine.team}) stood out: ${standoutLine.line}.`);
+  } else if(sum.leaders && sum.leaders.length){
+    const l=sum.leaders[0];
+    paras.push(`${l.name} (${l.team}) led the way: ${l.line}.`);
+  }
+  if(struggledLine){
+    paras.push(`${struggledLine.name} (${struggledLine.team}) had a rough night: ${struggledLine.line}.`);
+  }
 
-  return paras;
+  // Clean empties, cap length
+  return paras.filter(Boolean).slice(0,5);
 }
-
 
 // ── WP Chart: vertical line on tap, bigger dots, OT x-axis fix ──
 
