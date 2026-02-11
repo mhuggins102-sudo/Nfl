@@ -455,52 +455,56 @@ function WPChart({series, mode, onModeChange, exc, topLev, homeTeam, awayTeam}){
 
 
 // ── Category Detail Modal — game-specific, natural language ──
+// ── Category Detail Modal — game-specific, natural language ──
 function CategoryModal({cat,k,onClose,g,wpStats,enrichedPlays,sumData,wpSeries}){
-  const homeN=tn(g.ht),awayN=tn(g.at);
+  const homeN=tn(g.ht), awayN=tn(g.at);
   const homeShort=g.ht, awayShort=g.at;
   const winnerN=g.hs>g.as?homeN:awayN;
-  const loserN=g.hs>g.as?awayN:homeN;
-  const gr=gradeFor(cat.score,cat.max);
-  const topPlay=[...(enrichedPlays||[])].filter(p=>!/no play/i.test(p.text||"")).sort((a,b)=>(b.absDelta||0)-(a.absDelta||0))[0];
-  const notable=sumData?.notablePlays||[];
+
   const scoring=sumData?.scoringPlays||[];
-  const qNarr=sumData?.quarterNarrative||[];
+  const notable=sumData?.notablePlays||[];
   const series=wpSeries||[];
+
   let explanation="";
 
-  // Helper to describe a ratio in natural English
-  const ratioText=(r)=>{
-    if(r>=3.8&&r<=4.2)return"about four times";
-    if(r>=2.8&&r<=3.2)return"about three times";
-    if(r>=1.8&&r<=2.2)return"about twice";
-    if(r>=4.2)return`nearly ${Math.round(r)} times`;
-    if(r>=1.5)return`about ${r.toFixed(1)} times`;
-    return"close to";
-  };
+  // Convenience: top plays by WP swing
+  const topSwings=[...(enrichedPlays||[])]
+    .filter(p=>p?.text && !/no play/i.test(p.text))
+    .sort((a,b)=>(b.absDelta||0)-(a.absDelta||0))
+    .slice(0,3);
 
   if(k==="leverage"){
-    const swings=[...(enrichedPlays||[])]
-      .filter(p=>p?.text && !/no play/i.test(p.text))
-      .sort((a,b)=>(b.absDelta||0)-(a.absDelta||0))
-      .slice(0,3);
+    const sumAbs=wpStats?.sumAbsDelta;
+    const maxAbs=wpStats?.maxAbsDelta;
 
-    if(!swings.length){
-      explanation="No high-leverage plays were detected for this game.";
+    if(sumAbs==null){
+      explanation="Win probability movement wasn’t available for this game.";
     } else {
-      const sumAbs=wpStats?.sumAbsDelta;
-      explanation = (sumAbs!=null && sumAbs>=1.9)
-        ? "High-leverage moments stacked up in this game — the WP chart swings repeatedly on a few pivotal snaps. "
-        : "The biggest WP movement comes down to a few pivotal snaps. ";
+      if(sumAbs>=2.4) explanation="This one was extremely volatile — the win probability swung hard and often.";
+      else if(sumAbs>=1.9) explanation="High‑leverage moments stacked up — the win probability kept lurching on pivotal snaps.";
+      else if(sumAbs>=1.4) explanation="A fairly normal leverage profile — a few big moments, but not constant chaos.";
+      else explanation="Low leverage overall — the win probability moved, but rarely in dramatic steps.";
 
-      const lines=swings.map(p=>{
-        const swingPct=Math.round((p.absDelta||0)*100);
-        const desc=_describePlay(_humanizePlay(p.text),{
-          period:p.period, clock:p.clock,
-          homeScore:p.homeScore, awayScore:p.awayScore,
-          homeName:homeN, awayName:awayN
+      if(topSwings.length){
+        const lines=topSwings.map(p=>{
+          const swingPct=Math.round((p.absDelta||0)*100);
+          const desc=_describePlay(_humanizePlay(p.text),{
+            period:p.period, clock:p.clock,
+            homeScore:p.homeScore, awayScore:p.awayScore,
+            homeName:homeN, awayName:awayN
+          });
+          return desc ? `${swingPct}% on ${desc}` : `${swingPct}% swing`;
         });
-        return desc?`${swingPct}% on ${desc}`:`${swingPct}% swi} else if(k==="swings"){
+        explanation += " Biggest swings: " + lines.join("; ") + ".";
+      } else if(maxAbs!=null){
+        explanation += ` Peak swing: ${Math.round(maxAbs*100)}%.`;
+      }
+    }
+
+  } else if(k==="swings"){
+    // Scoring lead changes (not just WP crossings)
     const changes=_leadChangesFromScoring(scoring, homeShort, awayShort);
+
     if(!changes.length){
       explanation=`There were no scoring lead changes — ${winnerN} controlled the scoreboard throughout.`;
     } else {
@@ -508,118 +512,104 @@ function CategoryModal({cat,k,onClose,g,wpStats,enrichedPlays,sumData,wpSeries})
       const lastTwo=changes.slice(-2);
       const bits=lastTwo.map(ch=>{
         const p=ch.at;
+        const who=(ch.to===homeShort)?homeN:(ch.to===awayShort?awayN:ch.to);
         const desc=_describePlay(_humanizePlay(p.text),{
           period:p.period, clock:p.clock,
           homeScore:p.homeScore, awayScore:p.awayScore,
           homeName:homeN, awayName:awayN
         });
-        const who= (ch.to===homeShort)?homeN: (ch.to===awayShort?awayN:ch.to);
         return desc?`${who} grabbed the lead on ${desc} (score ${_scoreAfter(p)})`:`Lead change to ${who}`;
       });
       explanation += " " + bits.join(". ") + ".";
     }
-  }
-  WP advantage changed hands ${c50} times. There were stretches of control, but they didn't last.`;
+
+    const c50=wpStats?.crosses50;
+    if(c50!=null){
+      explanation += ` WP flipped at 50% ${c50} time${c50===1?"":"s"}.`;
     }
+
   } else if(k==="clutch"){
     // Final 8 minutes of regulation + OT
-    const clutchPlays=series.filter(p=>p?.remSec!=null && (p.remSec<=480 || p.period>4));
     const clutchScores=_sortByGameTimeDesc(scoring).filter(p=>{
       const r=_remSec(p.period,p.clock);
       return (p.period>4) || (r!=null && r<=480 && p.period<=4);
-    });
+    }).reverse();
 
-    const snapAt8 = series.reduce((best,p)=>{
-      if(p?.remSec==null||p.period>4) return best;
-      const d=Math.abs(p.remSec-480);
-      if(!best || d<best.d) return {d, p};
-      return best;
-    }, null)?.p;
-
-    if(clutchScores.length===0 && !clutchPlays.length){
+    if(!clutchScores.length && !(series||[]).some(p=>p?.remSec!=null && (p.remSec<=480 || p.period>4))){
       explanation="There wasn’t much late-game tension — the outcome was effectively decided before the final eight minutes.";
     } else {
-      if(snapAt8){
-        explanation=`With about eight minutes left, the score was ${snapAt8.awayScore}-${snapAt8.homeScore}. `;
-      } else {
-        explanation="Late-game leverage clustered in the closing minutes. ";
-      }
-
       if(clutchScores.length){
-        const chron=_sortByGameTimeDesc(clutchScores).reverse();
-        const pieces=chron.slice(-3).map(p=>{
+        const last=clutchScores.slice(-3).map(p=>{
           const desc=_describePlay(_humanizePlay(p.text),{
             period:p.period, clock:p.clock,
             homeScore:p.homeScore, awayScore:p.awayScore,
             homeName:homeN, awayName:awayN
           });
-          return desc?desc:null;
+          return desc||null;
         }).filter(Boolean);
-        if(pieces.length) explanation += "Closing scores: " + pieces.join("; ") + ". ";
+        if(last.length) explanation += "Late scoring: " + last.join("; ") + ". ";
       }
 
+      // Biggest late swing from WP series
+      const clutchPlays=(series||[]).filter(p=>p?.remSec!=null && (p.remSec<=480 || p.period>4));
       const topClutch=[...clutchPlays].sort((a,b)=>(b.absDelta||0)-(a.absDelta||0))[0];
-      if(topClutch && topClutch.text){
+      if(topClutch?.text){
         const swingPct=Math.round((topClutch.absDelta||0)*100);
         const desc=_describePlay(_humanizePlay(topClutch.text),{
           period:topClutch.period, clock:topClutch.clock,
           homeScore:topClutch.homeScore, awayScore:topClutch.awayScore,
           homeName:homeN, awayName:awayN
         });
-        if(desc) explanation += `The biggest late swing was about ${swingPct}% on ${desc}.`;
+        if(desc) explanation += `Biggest late swing: about ${swingPct}% on ${desc}.`;
       }
+      if(!explanation) explanation="There were meaningful moments late, but the biggest swings didn’t align cleanly to a single highlighted play.";
     }
-  }
+
+  } else if(k==="control"){
+    const frac=wpStats?.doubtFrac;
+    if(frac==null){
+      explanation="Competitiveness data wasn’t available for this game.";
+    } else {
+      const pct=Math.round(frac*100);
+      if(frac>=0.7) explanation=`The game stayed in doubt for most of the day (${pct}% between 20% and 80% WP).`;
+      else if(frac>=0.45) explanation=`A decent share of the game was competitive (${pct}% in the “in doubt” band), with swings back and forth.`;
+      else explanation=`The game wasn’t in doubt very often (${pct}% in the 20–80% band); one side usually held a clear edge.`;
+    }
+
   } else if(k==="chaos"){
     const turnovers=notable.filter(p=>p.type==="INT"||p.type==="FUM");
-    const bigTOs=series.filter(s=>s.tag==="TO"||s.tag==="SP").sort((a,b)=>b.absDelta-a.absDelta);
+    const chaosMarks=(series||[]).filter(s=>s.tag==="TO"||s.tag==="SP").sort((a,b)=>(b.absDelta||0)-(a.absDelta||0));
 
-    if(turnovers.length===0){
-      explanation=`No turnovers in this game. Both offenses protected the ball, keeping the flow orderly and methodical.`;
+    if(!turnovers.length && !chaosMarks.length){
+      explanation="No major chaos drivers (turnovers/special teams shocks) showed up in the data.";
+    } else if(!turnovers.length){
+      explanation="No turnovers, but special teams and/or explosive plays still created sharp win‑probability jolts.";
     } else {
-      explanation=`There were ${turnovers.length} turnover${turnovers.length>1?"s":""} in this game. `;
-      // Describe the most impactful one with full context
-      if(bigTOs[0]){
-        const to=bigTOs[0];
-        const toPer=_qLabel(to.period);
-        // Figure out who had the ball and what the score was
-        const toHomeScore=to.homeScore, toAwayScore=to.awayScore;
-        const possTeam=to.teamId;
-        // Determine which team lost possession (the team that had it)
-        const losingTeam=possTeam===g.ht?.id?homeN:possTeam===g.at?.id?awayN:null;
-        const scoreDiff=toHomeScore-toAwayScore;
-        let situation="";
-        if(toHomeScore!=null&&toAwayScore!=null){
-          const high=Math.max(toHomeScore,toAwayScore), low=Math.min(toHomeScore,toAwayScore);
-          const leader=toHomeScore>toAwayScore?homeN:toHomeScore<toAwayScore?awayN:null;
-          if(leader) situation=`while ${leader} led ${high}-${low}`;
-          else situation=`with the game tied ${high}-${low}`;
-        }
-        const clock=to.clock;
-        const swingPct=Math.round(to.absDelta*100);
-        // Build the description using humanized text
-        const toText=_humanizePlay(to.text);
-        explanation+=`The most impactful occurred `;
-        if(situation) explanation+=`${situation} `;
-        if(clock) explanation+=`with ${clock} left in the ${toPer}`;
-        else explanation+=`in the ${toPer}`;
-        if(toText) explanation+=`: ${toText}`;
-        if(swingPct>=5) explanation+=` (${swingPct}% WP swing)`;
-        explanation+=`. `;
+      explanation=`There ${turnovers.length===1?"was":"were"} ${turnovers.length} turnover${turnovers.length===1?"":"s"}.`;
+      const top=chaosMarks[0];
+      if(top?.text){
+        const swingPct=Math.round((top.absDelta||0)*100);
+        const per=_qLabel(top.period);
+        const clock=top.clock?`with ${top.clock} left in ${per}`:`in ${per}`;
+        const txt=_humanizePlay(top.text);
+        if(txt) explanation += ` The biggest chaos moment came ${clock}: ${txt}${swingPct?` (${swingPct}% WP swing)`:""}.`;
       }
-      if(turnovers.length>=3) explanation+=`That volume of turnovers made the game feel chaotic and unpredictable.`;
     }
+
   } else if(k==="contextR"){
-    if(cat.score>=7) explanation=`${homeN} and ${awayN} have one of the NFL's fiercest rivalries. That history raises the emotional stakes beyond what the standings alone suggest.`;
-    else if(cat.score>=4) explanation=`${homeN} and ${awayN} are division rivals, which adds familiarity and an extra edge to every matchup.`;
-    else explanation=`Not a significant rivalry. The drama here came purely from the game itself.`;
+    if(cat.score>=7) explanation=`This matchup carries real rivalry heat — history and familiarity add edge beyond the box score.`;
+    else if(cat.score>=4) explanation=`Division familiarity adds spice: the teams know each other’s tendencies, and the margin for error feels smaller.`;
+    else explanation=`Not much rivalry context here — the entertainment value depends on the game itself.`;
+
   } else if(k==="contextS"){
     const detail=cat.detail||"";
-    if(cat.score>=8) explanation=`Massive stakes — ${detail.includes("Super Bowl")?"the biggest game of the year":detail.includes("Championship")?"a conference championship":detail.includes("Divisional")?"a divisional playoff game":"a high-stakes playoff matchup"}. The pressure becomes part of the entertainment.`;
-    else if(cat.score>=5) explanation=`This game carried real standings implications. ${detail.includes("both in the mix")?"Both teams were jockeying for playoff positioning.":"The result mattered beyond just the record."}`;
-    else if(detail.includes("resting")) explanation=`Reduced stakes. ${detail.split("·").pop()?.trim()||"At least one team appeared to be resting key players."} That context limits the game's competitive significance.`;
-    else explanation=`Not a high-stakes matchup on paper. The drama had to come from the field.`;
+    if(cat.score>=8) explanation=`High stakes — this was the kind of game where every possession feels heavier.`;
+    else if(cat.score>=5) explanation=`Meaningful stakes — the result mattered for postseason position or momentum.`;
+    else if(/resting/i.test(detail)) explanation=`Reduced stakes — roster management context can flatten the competitive feel.`;
+    else explanation=`Lower stakes on paper — drama had to come from the play on the field.`;
   }
+
+  const gr=gradeFor(cat.score,cat.max);
 
   return h("div",{style:{position:"fixed",inset:0,background:"rgba(7,9,13,.85)",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center",padding:"1rem"},onClick:onClose},
     h("div",{style:{background:"var(--bg-2)",border:"1px solid var(--border-2)",padding:"1.5rem",maxWidth:"480px",width:"100%",maxHeight:"80vh",overflowY:"auto"},onClick:e=>e.stopPropagation()},
@@ -628,7 +618,7 @@ function CategoryModal({cat,k,onClose,g,wpStats,enrichedPlays,sumData,wpSeries})
         h("div",{className:`${cc(gr.c)}`,style:{fontFamily:"Oswald",fontSize:"1.5rem",fontWeight:700}},`${cat.score}/${cat.max}`)
       ),
       h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".7rem",color:"var(--gold-dim)",letterSpacing:".08em",textTransform:"uppercase",marginBottom:".5rem"}},`Grade: ${gr.g} — ${gr.l}`),
-      h("div",{style:{fontSize:".88rem",color:"var(--text-2)",lineHeight:1.75,marginBottom:".75rem"}},explanation),
+      h("div",{style:{fontSize:".88rem",color:"var(--text-2)",lineHeight:1.75,marginBottom:".75rem"}},explanation||""),
       h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".65rem",color:"var(--text-4)",borderTop:"1px solid var(--border-1)",paddingTop:".5rem"}},cat.detail),
       h("button",{onClick:onClose,style:{marginTop:"1rem",fontFamily:"Oswald",fontSize:".8rem",letterSpacing:".08em",textTransform:"uppercase",background:"var(--bg-3)",border:"1px solid var(--border-1)",color:"var(--text-2)",padding:".4rem 1rem",cursor:"pointer"}},"Close")
     )
