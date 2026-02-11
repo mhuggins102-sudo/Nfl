@@ -143,6 +143,8 @@ function buildRecap(sum){
 
   const homeAb=sum.homeTeam, awayAb=sum.awayTeam;
   const homeN=sum.homeName, awayN=sum.awayName;
+  const W=sum.winnerName||homeN;
+  const L=sum.loserName||awayN;
   const hs=sum.homeScore, as=sum.awayScore;
   const winnerIsHome = hs>as;
   const W = winnerIsHome ? homeN : awayN;
