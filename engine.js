@@ -275,53 +275,71 @@ export function getAllPlays(d){
 function normSpace(s){return String(s||"").replace(/\s+/g," ").trim();}
 
 export function extractKP(d){
-  const plays=getAllPlays(d);
-  const homeId=getHomeTeamId(d);
-  const cats=[];
-  for(let i=0;i<plays.length;i++){
-    const p=plays[i];
-    const raw=p.text||"";
+  const plays=sortPlaysChrono(getAllPlays(d));
+  const out=[];
+  const seen=new Set();
+
+  const isNoPlay=p=>{
+    const t=String(p.text||"");
+    return t.includes("(No Play)") || t.toLowerCase().includes(" no play");
+  };
+  const isDeadEvent=p=>{
+    const ty=(p.type?.text||"").toLowerCase();
+    const tx=(p.text||"").toLowerCase();
+    if(ty==="timeout"||ty==="two-minute warning") return true;
+    if(tx.startsWith("end quarter")||tx.startsWith("end game")) return true;
+    return false;
+  };
+  const isExtraPoint=p=>{
+    const ty=(p.type?.text||"").toLowerCase();
+    return ty.includes("extra point")||ty.includes("two-point");
+  };
+
+  for(const p of plays){
+    if(isDeadEvent(p) || isNoPlay(p)) continue;
+
+    const raw=String(p.text||"");
     const lo=raw.toLowerCase();
     const ty=(p.type?.text||"").toLowerCase();
     const y=p.statYardage||0;
     const period=p.period?.number||0;
     const clock=p.clock?.displayValue||"";
 
-    // SKIP plays with "No Play" (penalty nullified)
-    if(lo.includes("no play")||ty.includes("penalty")) continue;
-
     let tag=null;
-    // Scoring plays (TD, FG, safety)
-    if(lo.includes("touchdown")||lo.includes(" td ")||ty.includes("touchdown")) tag="TD";
-    else if(ty.includes("field goal")&&!ty.includes("missed")&&lo.includes("good")) tag="FG";
-    else if(lo.includes("safety")||ty.includes("safety")) tag="SP";
+
+    // All scoring plays (exclude PAT/2PT attempts)
+    if(p.scoringPlay && !isExtraPoint(p)){
+      if(lo.includes("touchdown")||ty.includes("touchdown")) tag="TD";
+      else if(ty.includes("field goal")||lo.includes("field goal")) tag="FG";
+      else if(lo.includes("safety")||ty.includes("safety")) tag="SP";
+      else tag="SC";
+    }
     // Turnovers
     else if(lo.includes("intercept")||ty.includes("interception")) tag="TO";
     else if(lo.includes("fumble")&&(lo.includes("recovered")||lo.includes("forced")||lo.includes("fumbles"))) tag="TO";
-    else if(ty.includes("turnover on downs")) tag="TO";
-    // Blocked kicks
-    else if(lo.includes("blocked")&&(lo.includes("punt")||lo.includes("field goal")||lo.includes("kick"))) tag="SP";
-    // 4th down attempts (success or failure)
-    else if(lo.includes("4th")&&(lo.includes("pass complete")||lo.includes("rush"))) tag="4D";
-    // Missed FG
-    else if(ty.includes("missed field goal")||lo.includes("field goal no good")||lo.includes("missed")) tag="CL";
-    // Big plays (40+ yards, not punts/kicks)
-    else if(y>=40&&!lo.includes("punt")&&!lo.includes("kickoff")) tag="BG";
+    else if(ty.includes("turnover on downs")||lo.includes("turnover on downs")) tag="TO";
+    // 4th down attempts (not punts/FGs)
+    else if(p.start?.down===4 && !ty.includes("punt") && !ty.includes("field goal")) tag="4D";
+    // Missed FG (rarely exciting, but can matter)
+    else if(ty.includes("missed field goal")||lo.includes("field goal no good")) tag="CL";
+    // Big plays (40+ yards, not punts/kickoffs)
+    else if(y>=40 && !ty.includes("punt") && !ty.includes("kickoff")) tag="BG";
 
-    if(tag){
-      // Get score after play
-      const hs=p.homeScore!=null?+p.homeScore:null;
-      const as=p.awayScore!=null?+p.awayScore:null;
-      cats.push({tag,text:titleizePlay(raw),period,clock,homeScore:hs,awayScore:as});
-    }
+    if(!tag) continue;
+
+    const hs=p.homeScore!=null?+p.homeScore:null;
+    const as=p.awayScore!=null?+p.awayScore:null;
+    const startPos=p.start?.possessionText||"";
+    const endPos=p.end?.possessionText||"";
+    const txt=titleizePlay(raw);
+
+    const k=tag+"|"+period+"|"+clock+"|"+txt.slice(0,60);
+    if(seen.has(k)) continue;
+    seen.add(k);
+
+    out.push({tag,text:txt,period,clock,homeScore:hs,awayScore:as,startPos,endPos,downDist:(p.start?.downDistanceText||"")});
   }
-  const uniq=[];const seen=new Set();
-  for(const x of cats){
-    const k=x.tag+"|"+x.period+"|"+x.clock+"|"+(x.text||"").slice(0,40);
-    if(seen.has(k))continue;
-    seen.add(k);uniq.push(x);
-  }
-  return uniq.slice(0,20);
+  return out.slice(0,30);
 }
 
 // ---------- Context scoring (rivalry / stakes) ----------
@@ -493,14 +511,24 @@ function computeWPSeries(d){
   const playsRaw=getAllPlays(d);
   if(!playsRaw.length || !homeId) return {series:[], stats:null};
 
+  // Always sort by sequenceNumber (chronological)
   const plays=sortPlaysChrono(playsRaw);
 
-  // Prefer ESPN's win probability feed when present. It is typically ordered to match the play sequence,
-  // but its playId values do not reliably match the play-by-play play.id values, so we align by index.
-  const wpFeed=Array.isArray(d.winprobability)?d.winprobability:null;
-  const useEspnWp=!!(wpFeed && wpFeed.length && Math.abs(wpFeed.length - plays.length) <= 2);
+  // ESPN sometimes provides a play-level WP series (preferred)
+  const wpList=Array.isArray(d?.winprobability)?d.winprobability:[];
+  const wpByPlayId=new Map();
+  for(const w of wpList){
+    if(w && w.playId!=null && w.homeWinPercentage!=null){
+      wpByPlayId.set(String(w.playId), +w.homeWinPercentage);
+    }
+  }
 
-  // Plays to skip entirely when computing heuristic WP (they don't affect game state)
+  // Detect common pattern: wpList[0] is a pre-game state not tied to a play,
+  // and wpList[1].playId equals the first play id.
+  const hasPregame = wpList.length===plays.length+1 &&
+    wpList[1]?.playId!=null && String(wpList[1].playId)===String(plays[0]?.id);
+
+  // Plays to skip entirely (they don't affect game state and shouldn't be in WP curve)
   const SKIP_TYPES=new Set([
     "timeout","end period","end of half","end of game","coin toss",
     "two-minute warning","official timeout","tv timeout"
@@ -510,15 +538,18 @@ function computeWPSeries(d){
   let prevWp=0.5;
   const series=[];
   let firstSet=false;
+  let idx=0;
 
-  for(let i=0;i<plays.length;i++){
-    const p=plays[i];
+  for(const p of plays){
     const per=p.period?.number||1;
     const clk=p.clock?.displayValue||p.clock?.value||p.clock;
     const typeText=(p.type?.text||"").toLowerCase();
 
-    // Skip non-game events
-    if(!useEspnWp && SKIP_TYPES.has(typeText)) continue;
+    if(SKIP_TYPES.has(typeText)) continue;
+
+    // Skip nullified snaps (penalty 'No Play')
+    const rawTxt=String(p.text||"");
+    if(rawTxt.includes("(No Play)") || rawTxt.toLowerCase().includes(" no play")) continue;
 
     const sc=getScoresFromPlay(p,lastScore);
     if(sc) lastScore=sc;
@@ -526,19 +557,24 @@ function computeWPSeries(d){
     const possTeamId=getPossTeamId(p);
     const possIsHome=(possTeamId==null)?null:(possTeamId===homeId);
 
-    // For kickoffs/punts/PATs, nullify possession to prevent artificial swings
-    const isNeutral=typeText.includes("kickoff")||typeText.includes("extra point")||
-      typeText.includes("two-point");
-    const effectivePoss=isNeutral?null:possIsHome;
-
-    // WP source: ESPN feed (preferred) or heuristic fallback
-    let wp;
-    if(useEspnWp){
-      const rec=wpFeed[i]||wpFeed[Math.min(i, wpFeed.length-1)];
-      const v=rec && typeof rec.homeWinPercentage === "number" ? rec.homeWinPercentage : null;
-      wp=(v==null)?null:Math.max(0, Math.min(1, v));
+    // Prefer ESPN WP when we can match by playId.
+    let wpESPN=null;
+    const pid=String(p.id||"");
+    if(wpByPlayId.has(pid)) wpESPN=wpByPlayId.get(pid);
+    else if(hasPregame){
+      const w=wpList[idx+1];
+      if(w && String(w.playId)===pid && w.homeWinPercentage!=null) wpESPN=+w.homeWinPercentage;
     }
-    if(wp==null){
+
+    let wp;
+    if(wpESPN!=null && Number.isFinite(wpESPN)){
+      wp=clamp(wpESPN,0,1);
+    }else{
+      // For kickoffs/PATs, nullify possession to prevent artificial swings in the fallback heuristic
+      const isNeutral=typeText.includes("kickoff")||typeText.includes("extra point")||
+        typeText.includes("two-point");
+      const effectivePoss=isNeutral?null:possIsHome;
+
       wp=wpHomeFromState({
         homeScore:lastScore.homeScore,
         awayScore:lastScore.awayScore,
@@ -547,8 +583,8 @@ function computeWPSeries(d){
         clock:clk
       });
     }
-    if(!firstSet){prevWp=wp;firstSet=true;}
 
+    if(!firstSet){prevWp=wp;firstSet=true;}
     const delta=wp-prevWp;
     const absDelta=Math.abs(delta);
     prevWp=wp;
@@ -568,8 +604,14 @@ function computeWPSeries(d){
       homeScore:lastScore.homeScore,
       awayScore:lastScore.awayScore,
       type:(p.type?.text||""),
-      tag:playTag(p.text||p.shortText||"", p.type?.text||"")
+      tag:playTag(p.text||p.shortText||"", p.type?.text||""),
+      playId:pid,
+      downDist:(p.start?.downDistanceText||""),
+      startPos:(p.start?.possessionText||""),
+      endPos:(p.end?.possessionText||"")
     });
+
+    idx++;
   }
 
   if(series.length<10) return {series, stats:null};
@@ -757,11 +799,36 @@ function classifyArchetype(wpSeries){
 
 function getTopLeveragePlays(wpSeries, n=6){
   if(!wpSeries || wpSeries.length<2) return [];
+
+  const isNoPlayTxt=t=>{
+    const s=String(t||"");
+    return s.includes("(No Play)") || s.toLowerCase().includes(" no play");
+  };
+
+  const isJunkEvent=x=>{
+    const ty=String(x.type||"").toLowerCase();
+    const tx=String(x.text||"").toLowerCase();
+    if(!tx) return true;
+    if(tx.startsWith("end quarter")||tx.startsWith("end game")) return true;
+    if(ty==="timeout"||ty==="two-minute warning") return true;
+    // Kickoffs are usually not informative for leverage; keep only if they are "special"
+    if(ty==="kickoff"){
+      const special = tx.includes("onside") || tx.includes("returned") || tx.includes("touchdown") || tx.includes("fumble");
+      if(!special) return true;
+    }
+    // Extra points are noise for leverage
+    if(ty.includes("extra point")||ty.includes("two-point")) return true;
+    // Nullified plays
+    if(isNoPlayTxt(tx)) return true;
+    return false;
+  };
+
   const scored = wpSeries
     .map((x,i)=>({...x, idx:i}))
-    .filter(x=>x.absDelta!=null && x.text)
+    .filter(x=>x.absDelta!=null && !isJunkEvent(x))
     .sort((a,b)=>b.absDelta-a.absDelta)
     .slice(0, n);
+
   scored.sort((a,b)=>a.idx-b.idx);
   return scored.map(x=>({
     period:x.period,
@@ -774,7 +841,10 @@ function getTopLeveragePlays(wpSeries, n=6){
     awayScore:x.awayScore,
     text:titleizePlay(x.text),
     type:x.type||"",
-    tag:x.tag||""
+    tag:x.tag||"",
+    startPos:x.startPos||"",
+    endPos:x.endPos||"",
+    downDist:x.downDist||""
   }));
 }
 
