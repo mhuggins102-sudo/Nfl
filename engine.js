@@ -277,6 +277,14 @@ function normSpace(s){return String(s||"").replace(/\s+/g," ").trim();}
 export function extractKP(d){
   const plays=getAllPlays(d);
   const homeId=getHomeTeamId(d);
+
+  // Build WP map for impact scoring
+  const {series:wpSeries}=computeWPSeries(d);
+  const wpByKey=new Map();
+  for(const s of (wpSeries||[])){
+    if(s.tMin!=null) wpByKey.set(`${s.period}|${s.clock}`, s);
+  }
+
   const cats=[];
   for(const p of plays){
     const raw=p.text||"";
@@ -285,6 +293,7 @@ export function extractKP(d){
     const y=p.statYardage||0;
     const period=p.period?.number||0;
     const clock=p.clock?.displayValue||"";
+    const down=p.start?.down??p.down??null;
 
     // SKIP plays with "No Play" (penalty nullified)
     if(lo.includes("no play")||ty.includes("penalty")) continue;
@@ -294,33 +303,47 @@ export function extractKP(d){
     if(lo.includes("touchdown")||lo.includes(" td ")||ty.includes("touchdown")) tag="TD";
     else if(ty.includes("field goal")&&!ty.includes("missed")&&lo.includes("good")) tag="FG";
     else if(lo.includes("safety")||ty.includes("safety")) tag="SP";
+    // Two-point conversions
+    else if(ty.includes("two-point")||lo.includes("two-point")||lo.includes("2-point")) tag="TD";
     // Turnovers
     else if(lo.includes("intercept")||ty.includes("interception")) tag="TO";
     else if(lo.includes("fumble")&&(lo.includes("recovered")||lo.includes("forced")||lo.includes("fumbles"))) tag="TO";
     else if(ty.includes("turnover on downs")) tag="TO";
     // Blocked kicks
     else if(lo.includes("blocked")&&(lo.includes("punt")||lo.includes("field goal")||lo.includes("kick"))) tag="SP";
-    // 4th down attempts (success or failure)
-    else if(lo.includes("4th")&&(lo.includes("pass complete")||lo.includes("rush"))) tag="4D";
+    // 4th down attempts — use play metadata (down===4) OR text pattern
+    else if((down===4||lo.includes("4th and"))&&!ty.includes("punt")&&!ty.includes("field goal")&&!ty.includes("penalty")) tag="4D";
     // Missed FG
     else if(ty.includes("missed field goal")||lo.includes("field goal no good")||lo.includes("missed")) tag="CL";
-    // Big plays (40+ yards, not punts/kicks)
-    else if(y>=40&&!lo.includes("punt")&&!lo.includes("kickoff")) tag="BG";
+    // Big plays (30+ yards for scrimmage plays, not punts/kicks)
+    else if(y>=30&&!lo.includes("punt")&&!lo.includes("kickoff")) tag="BG";
 
     if(tag){
-      // Get score after play
       const hs=p.homeScore!=null?+p.homeScore:null;
       const as=p.awayScore!=null?+p.awayScore:null;
-      cats.push({tag,text:titleizePlay(raw),period,clock,homeScore:hs,awayScore:as});
+      // Find WP impact for this play
+      const wpEntry=wpByKey.get(`${period}|${clock}`);
+      const wpSwing=wpEntry?Math.abs(wpEntry.delta||0):0;
+      cats.push({tag,text:titleizePlay(raw),period,clock,homeScore:hs,awayScore:as,wpSwing});
     }
   }
+  // Deduplicate
   const uniq=[];const seen=new Set();
   for(const x of cats){
     const k=x.tag+"|"+x.period+"|"+x.clock+"|"+(x.text||"").slice(0,40);
     if(seen.has(k))continue;
     seen.add(k);uniq.push(x);
   }
-  return uniq.slice(0,20);
+  // Sort by a priority that blends chronological order with impact:
+  // TDs/TOs first, then by WP swing, keeping chronological within tiers
+  const tagPriority={TD:3,TO:3,SP:2,FG:2,"4D":2,CL:1,BG:1};
+  uniq.sort((a,b)=>{
+    // High-WP-swing plays float up regardless of tag
+    const aImpact=(a.wpSwing>=0.08?1:0), bImpact=(b.wpSwing>=0.08?1:0);
+    if(aImpact!==bImpact) return bImpact-aImpact;
+    return 0; // preserve chronological for same tier
+  });
+  return uniq.slice(0,25);
 }
 
 // ---------- Context scoring (rivalry / stakes) ----------

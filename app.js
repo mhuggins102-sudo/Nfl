@@ -38,6 +38,11 @@ function _humanizePlay(raw){
   // Remove kicker XP parenthetical like "(Harrison Butker Kick)" or "(kick is good)"
   s=s.replace(/\s*\([^)]*\bKick\b[^)]*\)\s*$/i,"").trim();
   s=s.replace(/\s*\(\s*kick\s+is\s+(?:good|no\s+good)\s*\)\s*$/i,"").trim();
+  // Remove bare kicker name after TD: "...TOUCHDOWN H.Butker kick" or "...for a touchdown Butker"
+  s=s.replace(/\b(TOUCHDOWN|touchdown)\s+[A-Z][a-z]?\.\s*[A-Z][A-Za-z'-]+\s*(?:kick|Kick)?.*/i, "$1").trim();
+  // Remove trailing "Center-..." or "Holder-..." (snapper/holder info)
+  s=s.replace(/,?\s*Center-\S+.*/i,"").trim();
+  s=s.replace(/,?\s*Holder-\S+.*/i,"").trim();
 
   // Remove formation indicators
   s=s.replace(/\(.*?shotgun.*?\)/ig,"").replace(/\(.*?no huddle.*?\)/ig,"");
@@ -58,6 +63,8 @@ function _humanizePlay(raw){
   s=s.replace(/to [A-Z]{2,4}\s+(\d+)/g, "to the $1");
   // ", TOUCHDOWN" → " for a touchdown"
   s=s.replace(/,?\s*TOUCHDOWN/gi, " for a touchdown");
+  // Strip trailing kicker/holder after "for a touchdown" — catches "for a touchdown Butker" leftover
+  s=s.replace(/(for a touchdown)\s+[A-Z][A-Za-z'-]+\s*$/i, "$1");
   // "for no gain"
   s=s.replace(/for no gain/g,"for no gain");
   // Remove "No Play" completely
