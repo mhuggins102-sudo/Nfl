@@ -1,11 +1,8 @@
-// engine.js - Updated with heuristic fallback and fixed errors
+// engine.js - Cleaned up version without HTML comments
 // Note: This file's functions are now primarily inlined in app.js for this delivery.
 // However, here is the corrected and enhanced version of the heuristic/wp logic that *could* be re-exported from engine.js for cleaner separation.
 
 // --- Corrected and Enhanced Functions for Potential Re-inclusion in engine.js ---
-
-// Fixed typo in variable name: homeSc ore -> homeScore
-// Fixed typo in variable name: homeSc ore -> homeScore (in multiple places)
 
 // Function to calculate heuristic WP if official data is unavailable
 function getWPSeriesHeuristic(summaryData, homeScore, awayScore) {
