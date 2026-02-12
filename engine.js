@@ -75,11 +75,6 @@ function gameElapsedSec(period, clock){
   }
   return base + elIn;
 }
-
-function clockToMinutes(period, clock){
-  const el = gameElapsedSec(period, clock);
-  return el==null ? null : (el/60);
-}
 function gameRemainingSec(period, clock){
   const p=period||1;
   const rem=parseClockToSeconds(clock);
@@ -481,27 +476,16 @@ function sortPlaysChrono(plays){
 }
 
 export function playTag(text,type){
-  // Accept either a play object or a string. Prefer textual fields from ESPN play objects.
-  let s = "";
-  if(typeof text === "string") s = text;
-  else if(text && typeof text === "object"){
-    s = text.text || text.shortText || text.description || text.playText || "";
-  } else if(text != null) {
-    s = String(text);
-  }
-  const lo=(s||"").toLowerCase();
+  const lo=(text||"").toLowerCase();
   const ty=(type||"").toLowerCase();
-  if(lo.includes("no play")) return ""; // nullified; don't tag
   if(lo.includes("intercept")||ty.includes("interception")) return "TO";
   if(lo.includes("fumble")) return "TO";
   if(lo.includes("turnover on downs")||ty.includes("turnover on downs")) return "TO";
   if(lo.includes("blocked")&&(lo.includes("punt")||lo.includes("field goal"))) return "SP";
   if(lo.includes("safety")||ty.includes("safety")) return "SP";
-  // Treat missed FGs as clutch/chaos moments
-  if(ty.includes("missed field goal")||lo.includes("field goal no good")||lo.includes("missed field goal")) return "CL";
+  if(ty.includes("missed field goal")||lo.includes("missed")) return "CL";
   return "";
 }
-
 
 function computeWPSeries(d){
   const homeId=getHomeTeamId(d);
@@ -510,16 +494,6 @@ function computeWPSeries(d){
 
   const plays=sortPlaysChrono(playsRaw);
 
-  // ESPN provides a play-level WP series in summary JSON (winprobability[]).
-  // We map by playId -> homeWinPercentage. Some entries are pregame; ignore those if they don't match any play.id.
-  const wpMap=new Map();
-  const wpArr=(d && d.winprobability) ? d.winprobability : [];
-  for(const w of (wpArr||[])){
-    const pid=String(w.playId||"");
-    const p=Number(w.homeWinPercentage);
-    if(pid && Number.isFinite(p)) wpMap.set(pid, p);
-  }
-
   // Plays to skip entirely (they don't affect game state)
   const SKIP_TYPES=new Set([
     "timeout","end period","end of half","end of game","coin toss",
@@ -527,105 +501,63 @@ function computeWPSeries(d){
   ]);
 
   let lastScore={homeScore:0,awayScore:0};
-  let prevWp=null;
-
+  let prevWp=0.5;
   const series=[];
-  let sumAbs=0, maxAbs=0, crosses50=0, lastSide=null;
-  let usedEspn=0, usedHeur=0;
+  let firstSet=false;
 
   for(const p of plays){
     const per=p.period?.number||1;
     const clk=p.clock?.displayValue||p.clock?.value||p.clock;
     const typeText=(p.type?.text||"").toLowerCase();
-    const textRaw=(p.text||p.shortText||"");
 
-    // Skip non-play events
+    // Skip non-game events
     if(SKIP_TYPES.has(typeText)) continue;
-
-    // Skip nullified snaps (penalty "No Play")
-    if(/\bNo Play\b/i.test(textRaw)) continue;
 
     const sc=getScoresFromPlay(p,lastScore);
     if(sc) lastScore=sc;
 
-    // Determine "scoring snap" (exclude PAT/2PT)
-    const isPAT=typeText.includes("extra point")||typeText.includes("two-point");
-    const isScoring=!!p.scoringPlay && !isPAT;
+    const possTeamId=getPossTeamId(p);
+    const possIsHome=(possTeamId==null)?null:(possTeamId===homeId);
 
-    // Pull ESPN WP when available for this play id; otherwise fall back.
-    const pid=String(p.id||"");
-    let wp=wpMap.has(pid) ? wpMap.get(pid) : null;
-    let wpSource="espn";
-    if(wp==null || !Number.isFinite(wp)){
-      // Fallback heuristic model (score/time/possession)
-      const possTeamId=getPossTeamId(p);
-      const possIsHome=(possTeamId==null)?null:(possTeamId===homeId);
+    // For kickoffs/punts/PATs, nullify possession to prevent artificial swings
+    const isNeutral=typeText.includes("kickoff")||typeText.includes("extra point")||
+      typeText.includes("two-point");
+    const effectivePoss=isNeutral?null:possIsHome;
 
-      // For kickoffs/punts/PATs, nullify possession to prevent artificial swings
-      const isNeutral=typeText.includes("kickoff")||typeText.includes("punt")||isPAT;
-      const effectivePoss=isNeutral?null:possIsHome;
-
-      wp=wpHomeFromState({
-        homeScore:lastScore.homeScore,
-        awayScore:lastScore.awayScore,
-        possIsHome:effectivePoss,
-        period:per,
-        clock:clk
-      });
-      wpSource="heuristic";
-      usedHeur++;
-    } else {
-      usedEspn++;
-    }
-
-    // Initialize prevWp on the first datapoint
-    if(prevWp==null) prevWp=wp;
+    const wp=wpHomeFromState({
+      homeScore:lastScore.homeScore,
+      awayScore:lastScore.awayScore,
+      possIsHome:effectivePoss,
+      period:per,
+      clock:clk
+    });
+    if(!firstSet){prevWp=wp;firstSet=true;}
 
     const delta=wp-prevWp;
     const absDelta=Math.abs(delta);
+    prevWp=wp;
 
-    // Track stats
-    sumAbs+=absDelta;
-    if(absDelta>maxAbs) maxAbs=absDelta;
-    const side=wp>=0.5?"home":"away";
-    if(lastSide && side!==lastSide) crosses50++;
-    lastSide=side;
-
-    // Basic tagging for "key play" surfacing
-    const tag=playTag(p, typeText);
+    const rem=gameRemainingSec(per, clk);
+    const elapsed=gameElapsedSec(per, clk);
+    const text=normSpace(p.text||p.shortText||p.type?.text||"");
 
     series.push({
-      id:pid,
+      wp, delta, absDelta,
       period:per,
       clock:clk,
-      tMin:clockToMinutes(per,clk),
-      wp,
-      delta,
-      absDelta,
+      remSec:rem,
+      tMin:(elapsed!=null?elapsed/60:null),
+      text,
+      teamId:possTeamId,
       homeScore:lastScore.homeScore,
       awayScore:lastScore.awayScore,
-      text:textRaw,
-      type:typeText,
-      tag,
-      isScoring,
-      wpSource
+      type:(p.type?.text||""),
+      tag:playTag(p.text||p.shortText||"", p.type?.text||"")
     });
-
-    prevWp=wp;
   }
 
-  // Derive "biggest swings" candidates using a stricter filter so we don't highlight junk.
-  // (Chart can still show every point; this only affects which plays get picked for blurbs.)
-  const stats={
-    sumAbsDelta:sumAbs,
-    maxAbsDelta:maxAbs,
-    crosses50,
-    usedEspn,
-    usedHeuristic:usedHeur,
-    espnFrac:(usedEspn+usedHeur)?(usedEspn/(usedEspn+usedHeur)):0
-  };
-
-  return {series, stats};
+  if(series.length<10) return {series, stats:null};
+  return {series, stats: computeWPStats(series)};
 }
 
 // Compute statistics from WP series
@@ -711,7 +643,7 @@ function computeExcFromWP(g,d,wpStats){
 
   const swing01 = scale01(wpStats.crosses50 + 1.5*wpStats.crosses4060, 1, 10);
 
-  const clutch01 = scale01(wpStats.lateSumAbsDelta + 2.0*wpStats.lateMaxAbsDelta, 0.15, 1.10);
+  const clutch01 = scale01((wpStats.lateSumAbsDelta ?? 0) + 2.0*(wpStats.lateMaxAbsDelta ?? 0), 0.15, 1.10);
 
   const doubt01 = scale01(wpStats.doubtFrac, 0.25, 0.85);
 
@@ -739,7 +671,7 @@ function computeExcFromWP(g,d,wpStats){
     max:15,
     name:"Clutch Time",
     desc:"Late leverage (final 8:00 of 4Q + OT), where changes are most meaningful",
-    detail:`Late Σ|ΔWP|=${wpStats.lateSumAbsDelta.toFixed(2)}, late peak=${wpStats.lateMaxAbsDelta.toFixed(2)}`
+    detail:`Late Σ|ΔWP|=${(wpStats.lateSumAbsDelta ?? 0).toFixed(2)}, late peak=${(wpStats.lateMaxAbsDelta ?? 0).toFixed(2)}`
   };
   const control = {
     score: scoreFrom01(doubt01, 10),
@@ -826,9 +758,7 @@ function getTopLeveragePlays(wpSeries, n=6){
     awayScore:x.awayScore,
     text:titleizePlay(x.text),
     type:x.type||"",
-    tag:x.tag||"",
-    isScoring:!!x.isScoring,
-    wpSource:x.wpSource||""
+    tag:x.tag||""
   }));
 }
 
