@@ -501,7 +501,13 @@ function computeWPSeries(d){
     for(const w of wpArr){
       const pid=(w?.playId!=null)?String(w.playId):null;
       const hp=w?.homeWinPercentage;
-      if(pid && typeof hp==="number") wpMap.set(pid, hp/100);
+      if(pid && typeof hp==="number"){
+        // ESPN feeds vary: some provide 0..1, others 0..100.
+        let v = hp;
+        if(v > 1.01) v = v/100;
+        v = Math.max(0, Math.min(1, v));
+        wpMap.set(pid, v);
+      }
     }
   }
 
