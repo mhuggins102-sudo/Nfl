@@ -68,22 +68,22 @@ function _humanizePlay(raw){
 // Takes the raw play text plus context (score, time, teams)
 function _describePlay(raw, ctx){
   let text=_humanizePlay(raw);
-  if(!text) return "";
-  // ctx: {period, clock, homeScore, awayScore, homeName, awayName}
+  if(!text)return"";
+  // ctx: {period, clock, homeScore, awayScore, homeName, awayName, absDelta}
   if(ctx){
-    const per = (ctx.period && ctx.period<=4) ? `Q${ctx.period}` : "OT";
+    const per=ctx.period<=4?`Q${ctx.period}`:"OT";
     const parts=[];
     if(ctx.clock) parts.push(`with ${ctx.clock} left in the ${per}`);
-    if(ctx.homeScore!=null && ctx.awayScore!=null && ctx.homeName && ctx.awayName){
-      if(ctx.homeScore>ctx.awayScore) parts.push(`${ctx.homeName} led ${ctx.homeScore}-${ctx.awayScore}`);
-      else if(ctx.awayScore>ctx.homeScore) parts.push(`${ctx.awayName} led ${ctx.awayScore}-${ctx.homeScore}`);
-      else parts.push(`score tied ${ctx.homeScore}-${ctx.awayScore}`);
+    if(ctx.homeScore!=null && ctx.awayScore!=null){
+      const leader=ctx.homeScore>ctx.awayScore?ctx.homeName:ctx.homeScore<ctx.awayScore?ctx.awayName:null;
+      const high=Math.max(ctx.homeScore,ctx.awayScore), low=Math.min(ctx.homeScore,ctx.awayScore);
+      if(leader) parts.push(`giving ${leader} a ${high}-${low} lead`);
+      else if(ctx.homeScore===ctx.awayScore) parts.push(`tying the game at ${high}`);
     }
-    if(parts.length) text += `, ${parts.join(", ")}`;
+    if(parts.length) text+=`, ${parts.join(", ")}`;
   }
   return text;
 }
-
 
 function _pick(arr,seed){if(!arr.length)return"";return arr[Math.abs(seed)%arr.length];}
 function _qLabel(p){return p<=4?`Q${p}`:"OT";}
@@ -713,7 +713,7 @@ function App(){
       sDet({exc,kp,box,stats,pStats,d,wp});sCache(p=>({...p,[g.id]:exc.total}));sLdD(false);
       sSumLoading(true);
       const sd=buildSummaryData(g,d,exc);sSumData(sd);sSummary(buildRecap(sd));sSumLoading(false);
-    }catch(e){sErr("Failed to analyze. ESPN data may not be available.");sLdD(false)}
+    }catch(e){console.error("ANALYZE_ERROR",e);const msg=(e&&e.message)?e.message:String(e);const st=(e&&e.stack)?("\n"+e.stack):"";sErr("Failed to analyze: "+msg+st);sLdD(false)}
   },[]);
 
   const batchAn=useCallback(async()=>{
