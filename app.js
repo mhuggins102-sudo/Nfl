@@ -54,8 +54,8 @@ const App = () => {
     const status = gameEvent.status.type.name;
     const isComplete = status === 'STATUS_FINAL';
     const competition = gameEvent.competitions[0];
-    const homeTeam = competition.competitors.find(c => c.homeAway === 'home');
-    const awayTeam = competition.competitors.find(c => c.homeAway === 'away');
+    const homeTeam = competition.competitors?.find(c => c.homeAway === 'home');
+    const awayTeam = competition.competitors?.find(c => c.homeAway === 'away');
 
     if (!homeTeam || !awayTeam) {
       console.error("Could not find home or away team for game:", id);
@@ -69,24 +69,19 @@ const App = () => {
     // Attempt to get official WP series from summary data (acts like nflfastR data)
     let wpSeries = [];
     let officialWPAvailable = false;
-    if (d && d.probabilities && Array.isArray(d.probabilities)) {
-      wpSeries = d.probabilities.map(prob => ({
-        timeRemaining: prob.timeRemaining,
-        homeWinPercentage: prob.homeWinPercentage
-      }));
-      // Sort by timeRemaining descending to match the expected format (start -> end)
-      wpSeries.sort((a, b) => b.timeRemaining - a.timeRemaining);
-      officialWPAvailable = true;
+    // Safely check for probabilities array in the summary data (d)
+    if (d && d.gamepackageJSON && Array.isArray(d.gamepackageJSON.probabilities)) {
+        wpSeries = d.gamepackageJSON.probabilities.map(prob => ({
+            timeRemaining: prob.timeRemaining,
+            homeWinPercentage: prob.homeWinPercentage
+        })).sort((a, b) => b.timeRemaining - a.timeRemaining); // Sort descending by time remaining
+        officialWPAvailable = wpSeries.length > 0;
     }
 
     // Fallback to heuristic model if official data is not available
-    if (wpSeries.length === 0) {
-      // This part would need the heuristic model from engine.js
-      // For now, assume it's handled externally or set a default
-      // Let's call a function from engine.js to get the heuristic series
-      wpSeries = getWPSeriesHeuristic(d, homeScore, awayScore); // This needs to be defined/imported
-      // Placeholder - define/get heuristic WP if needed
-      // wpSeries = [{timeRemaining: 3600, homeWinPercentage: 50}, {timeRemaining: 0, homeWinPercentage: homeScore > awayScore ? 99 : 1}];
+    if (!officialWPAvailable) {
+        // Use the heuristic function (now included inline below)
+        wpSeries = getWPSeriesHeuristic(d, homeScore, awayScore);
     }
 
     // Calculate Excitement Index using the WP series
@@ -115,21 +110,21 @@ const App = () => {
   };
 
   // --- Engine Functions Inlined for Simplicity ---
-  // These functions would typically be imported from engine.js
-  // For this output, they are included here.
+  // These functions are now correctly placed inside the component scope or are self-contained.
 
-  // Placeholder for heuristic WP calculation (if needed)
+  // Heuristic WP calculation fallback
   const getWPSeriesHeuristic = (d, homeScore, awayScore) => {
      // This is a simplified placeholder. The actual heuristic from engine.js should be used.
      // For now, return a basic series based on final score if no official data.
-     if (!d || !d.plays || !Array.isArray(d.plays)) {
-         return [{ timeRemaining: 3600, homeWinPercentage: 50 }];
-     }
      // A more sophisticated heuristic would go here, potentially calling functions from engine.js
-     // For this example, let's return a flat line at 50% if no official data exists.
+     // For this example, let's return a flat line at 50% if no official data exists, ending at 100/0.
      // This is not ideal but prevents errors if the engine.js import isn't working seamlessly here.
      // In practice, engine.js should export these functions properly.
-     return [{ timeRemaining: 3600, homeWinPercentage: 50 }];
+     const finalWP = homeScore > awayScore ? 100 : (homeScore < awayScore ? 0 : 50);
+     return [
+         { timeRemaining: 3600, homeWinPercentage: 50 }, // Start at 50%
+         { timeRemaining: 0, homeWinPercentage: finalWP } // End at final result
+     ];
   };
 
   // Simplified Excitement Index Calculation based on WP swings
@@ -156,7 +151,9 @@ const App = () => {
 
   const extractKeyPlays = (d, wpSeries) => {
     const keyPlays = [];
-    if (!d || !d.plays || !Array.isArray(d.plays)) return keyPlays;
+    if (!d || !d.gamepackageJSON || !Array.isArray(d.gamepackageJSON.plays)) return keyPlays;
+
+    const plays = d.gamepackageJSON.plays;
 
     // Find moments of maximum WP swing
     let lastWP = wpSeries[0]?.homeWinPercentage ?? 50;
@@ -171,54 +168,69 @@ const App = () => {
     swings.sort((a, b) => b.swing - a.swing);
     const topSwings = swings.slice(0, 10); // Take top 10 swings
 
-    const plays = d.plays;
     topSwings.forEach(swingPoint => {
         // Find closest play in time
         const closestPlay = plays.reduce((prev, curr) => {
-             const prevTime = (parseInt(prev.clock.displayValue.split(':')[0]) || 0) * 60 + (parseInt(prev.clock.displayValue.split(':')[1]) || 0);
-             const currTime = (parseInt(curr.clock.displayValue.split(':')[0]) || 0) * 60 + (parseInt(curr.clock.displayValue.split(':')[1]) || 0);
-             const targetTime = (parseInt(swingPoint.timeRemaining.split(':')[0]) || 0) * 60 + (parseInt(swingPoint.timeRemaining.split(':')[1]) || 0);
-             return (Math.abs(currTime - targetTime) < Math.abs(prevTime - targetTime) ? curr : prev);
+             // Safely parse clock times (format might be MM:SS or M:SS)
+             const parseClock = (clockStr) => {
+                 if (!clockStr) return 0;
+                 const parts = clockStr.split(':').map(Number);
+                 if (parts.length !== 2) return 0;
+                 return parts[0] * 60 + parts[1];
+             };
+             const prevTime = parseClock(prev.clock?.displayValue);
+             const currTime = parseClock(curr.clock?.displayValue);
+             const targetTime = parseClock(swingPoint.timeRemaining);
+
+             // Calculate time difference in seconds
+             const diffPrev = Math.abs(prevTime - targetTime);
+             const diffCurr = Math.abs(currTime - targetTime);
+             return (diffCurr < diffPrev ? curr : prev);
         });
 
         if (closestPlay && !keyPlays.some(kp => kp.playId === closestPlay.id)) {
             keyPlays.push({
                 playId: closestPlay.id,
                 description: closestPlay.text || 'Key Play',
-                quarter: closestPlay.period.number,
-                clock: closestPlay.clock.displayValue,
+                quarter: closestPlay.period?.number || 'N/A',
+                clock: closestPlay.clock?.displayValue || '00:00',
                 wpChange: swingPoint.swing.toFixed(2),
-                tags: closestPlay.tags || []
+                tags: closestPlay.tags?.map(t => t.displayName) || [] // Get tag names
             });
         }
     });
 
-    // Also add plays explicitly marked as significant by API or heuristic (e.g., scores, turnovers)
-    plays.filter(play => play.scoringPlay || play.turnover).forEach(play => {
+    // Also add plays explicitly marked as significant by API (e.g., scores, turnovers)
+    // Avoid duplicates with swing-based plays
+    plays.filter(play => play.scoringPlay || play.turnoverPlays?.length > 0).forEach(play => {
         if (!keyPlays.some(kp => kp.playId === play.id)) {
              let tags = [];
              if (play.scoringPlay) tags.push('SCORE');
-             if (play.turnover) tags.push('TURNOVER');
-             // Add other relevant tags
+             if (play.turnoverPlays && play.turnoverPlays.length > 0) tags.push('TURNOVER');
+             // Add other relevant tags if available
              keyPlays.push({
                  playId: play.id,
                  description: play.text || 'Significant Play',
-                 quarter: play.period.number,
-                 clock: play.clock.displayValue,
+                 quarter: play.period?.number || 'N/A',
+                 clock: play.clock?.displayValue || '00:00',
                  wpChange: 'N/A', // Difficult to calculate without full series mapping
                  tags
              });
         }
     });
 
+    // Sort key plays by quarter and time remaining (descending order within quarter)
     keyPlays.sort((a, b) => {
-        // Sort by quarter asc, then by time remaining desc (e.g., 15:00 before 14:59)
         if (a.quarter !== b.quarter) return a.quarter - b.quarter;
-        // Convert MM:SS to seconds for comparison
-        const [minA, secA] = a.clock.split(':').map(Number);
-        const [minB, secB] = b.clock.split(':').map(Number);
-        const timeA = minA * 60 + secA;
-        const timeB = minB * 60 + secB;
+        // Parse clock times for comparison
+        const parseClock = (clockStr) => {
+            if (!clockStr) return 0;
+            const parts = clockStr.split(':').map(Number);
+            if (parts.length !== 2) return 0;
+            return parts[0] * 60 + parts[1];
+        };
+        const timeA = parseClock(a.clock);
+        const timeB = parseClock(b.clock);
         return timeB - timeA; // Descending order of time remaining (earlier in game first)
     });
 
@@ -227,12 +239,12 @@ const App = () => {
 
   const buildRecap = (gameEvent, homeScore, awayScore, keyPlays, wpSeries, totalScore) => {
       const competition = gameEvent.competitions[0];
-      const homeTeamName = competition.competitors.find(c => c.homeAway === 'home').team.displayName;
-      const awayTeamName = competition.competitors.find(c => c.homeAway === 'away').team.displayName;
+      const homeTeamName = competition.competitors?.find(c => c.homeAway === 'home')?.team.displayName || 'Home Team';
+      const awayTeamName = competition.competitors?.find(c => c.homeAway === 'away')?.team.displayName || 'Away Team';
       const winner = homeScore > awayScore ? homeTeamName : awayTeamName;
       const loser = homeScore > awayScore ? awayTeamName : homeTeamName;
       const winMargin = Math.abs(homeScore - awayScore);
-      const isOT = competition.status.type.name.includes('OVERTIME'); // Check status type
+      const isOT = competition.status.type.name.toLowerCase().includes('overtime'); // Check status type
 
       let opener = `${winner} defeated ${loser} ${homeScore}-${awayScore}.`;
       if (isOT) opener = `${winner} outlasted ${loser} in overtime, ${homeScore}-${awayScore}.`;
@@ -243,23 +255,23 @@ const App = () => {
       if (wpSeries.length > 0) {
           const initialWP = wpSeries[0].homeWinPercentage;
           const finalWP = wpSeries[wpSeries.length - 1].homeWinPercentage;
-          const homeWasLosingBadly = initialWP < 20 || initialWP > 80; // Either team was behind significantly early
+          const homeWasLosingBadlyEarly = initialWP < 20 || initialWP > 80; // Either team was behind significantly early
           const outcomeChanged = (initialWP < 50 && finalWP > 50) || (initialWP > 50 && finalWP < 50);
 
-          if (homeWasLosingBadly && outcomeChanged) {
+          if (homeWasLosingBadlyEarly && outcomeChanged) {
               const trailingTeam = initialWP < 50 ? homeTeamName : awayTeamName;
               const leadingTeam = initialWP < 50 ? awayTeamName : homeTeamName;
-              opener = `${trailingTeam} staged a remarkable comeback to defeat ${leadingTeam} ${homeScore}-${awayScore}.`;
+              opener = `${trailingTeam} mounted a stunning comeback to defeat ${leadingTeam} ${homeScore}-${awayScore}.`;
           }
       }
 
       let flow = "";
       if (winMargin <= 7 && !isOT) {
-          flow = " The game remained close throughout.";
+          flow = " The contest stayed tight throughout.";
       } else if (winMargin > 7 && winMargin <= 14) {
-          flow = " The game featured a period of dominance followed by a late push.";
+          flow = " One team pulled ahead before the other mounted a late challenge.";
       } else {
-          flow = " The winning team controlled the game from start to finish.";
+          flow = " The winning side maintained control for most of the game.";
       }
 
       const keyPlayDescriptions = keyPlays.slice(0, 3).map(kp => _describePlay(kp, homeTeamName, awayTeamName)).join(' ');
@@ -271,13 +283,18 @@ const App = () => {
   const _describePlay = (kp, homeTeamName, awayTeamName) => {
       let desc = kp.description || "A significant play occurred.";
       // Enhance based on tags
-      if (kp.tags.includes('SCORE')) {
-          if (kp.tags.includes('TOUCHDOWN')) desc = `A crucial touchdown by ${kp.tags.includes('HOME') ? homeTeamName : awayTeamName} changed the momentum.`;
-          else if (kp.tags.includes('FIELD_GOAL')) desc = `A clutch field goal by ${kp.tags.includes('HOME') ? homeTeamName : awayTeamName} kept them in contention.`;
+      if (kp.tags.includes('TOUCHDOWN')) {
+          desc = `A crucial TD by ${kp.tags.includes('HOME_TEAM') ? homeTeamName : awayTeamName} shifted momentum.`;
+      } else if (kp.tags.includes('FIELD_GOAL')) {
+          desc = `A clutch FG by ${kp.tags.includes('HOME_TEAM') ? homeTeamName : awayTeamName} kept them close.`;
       } else if (kp.tags.includes('TURNOVER')) {
-           desc = `A pivotal turnover by ${kp.tags.includes('HOME') ? homeTeamName : awayTeamName} shifted the game's direction.`;
+           desc = `A pivotal turnover by ${kp.tags.includes('HOME_TEAM') ? homeTeamName : awayTeamName} changed the game's direction.`;
       } else if (kp.wpChange && parseFloat(kp.wpChange) > 15) {
-          desc = `A game-changing play in the ${kp.quarter}Q dramatically altered the outcome.`; // More generic if specific details aren't clear
+          desc = `A dramatic play in Q${kp.quarter} swung the odds significantly.`; // More generic if specific details aren't clear
+      } else if (kp.tags.includes('SAFETY')) {
+          desc = `An unexpected safety added an unusual twist.`;
+      } else if (kp.tags.includes('PENALTY')) {
+          desc = `A costly penalty proved decisive.`;
       }
       // Add time context if available
       if (kp.clock) {
