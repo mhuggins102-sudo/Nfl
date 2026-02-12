@@ -11,7 +11,7 @@ const _ns=s=>(s||"").toString().replace(/\s+/g," ").trim();
 function _cleanPlay(s){
   s=_ns(s);if(!s)return"";
   // Remove everything after extra point / PAT / penalty markers
-  const cuts=["extra point","TWO-POINT","two-point","Penalty","PENALTY","(kick failed)","(pass failed)","(run formation)"];
+  const cuts=["extra point","TWO-POINT","two-point","Penalty","PENALTY","(kick failed)","(pass failed)","(run formation)","kick is good","kick is no good"];
   for(const m of cuts){const i=s.toLowerCase().indexOf(m.toLowerCase());if(i>0){s=s.slice(0,i).trim();break;}}
   s=s.replace(/\(.*?shotgun.*?\)/ig,"").replace(/\(.*?no huddle.*?\)/ig,"").replace(/\s+/g," ").trim();
   s=s.replace(/\.+$/,"").trim();
@@ -35,6 +35,10 @@ function _humanizePlay(raw){
   // Remove extra point / PAT / 2pt attempt
   const patCuts=["extra point","TWO-POINT","two-point","(kick failed)","(pass failed)","(run failed)"];
   for(const m of patCuts){const i=s.toLowerCase().indexOf(m.toLowerCase());if(i>0){s=s.slice(0,i).trim();break;}}
+  // Remove kicker XP parenthetical like "(Harrison Butker Kick)" or "(kick is good)"
+  s=s.replace(/\s*\([^)]*\bKick\b[^)]*\)\s*$/i,"").trim();
+  s=s.replace(/\s*\(\s*kick\s+is\s+(?:good|no\s+good)\s*\)\s*$/i,"").trim();
+
   // Remove formation indicators
   s=s.replace(/\(.*?shotgun.*?\)/ig,"").replace(/\(.*?no huddle.*?\)/ig,"");
   // Remove defensive player brackets [K.Joseph]
@@ -641,7 +645,12 @@ function CategoryModal({cat,k,onClose,g,wpStats,enrichedPlays,sumData,wpSeries})
     }
   } else if(k==="contextR"){
     if(cat.score>=7) explanation=`${homeN} and ${awayN} have one of the NFL's fiercest rivalries. That history raises the emotional stakes beyond what the standings alone suggest.`;
-    else if(cat.score>=4) explanation=`${homeN} and ${awayN} are division rivals, which adds familiarity and an extra edge to every matchup.`;
+    else if(cat.score>=4){
+      const sameDiv = (sum?.homeDivision && sum?.awayDivision && sum.homeDivision===sum.awayDivision);
+      explanation = sameDiv
+        ? `${homeN} and ${awayN} are division rivals, which adds familiarity and an extra edge to every matchup.`
+        : `${homeN} and ${awayN} are familiar opponents, which adds an extra edge to the matchup.`;
+    }
     else explanation=`Not a significant rivalry. The drama here came purely from the game itself.`;
   } else if(k==="contextS"){
     const detail=cat.detail||"";
@@ -713,7 +722,7 @@ function App(){
       sDet({exc,kp,box,stats,pStats,d,wp});sCache(p=>({...p,[g.id]:exc.total}));sLdD(false);
       sSumLoading(true);
       const sd=buildSummaryData(g,d,exc);sSumData(sd);sSummary(buildRecap(sd));sSumLoading(false);
-    }catch(e){console.error("ANALYZE_ERROR",e);const msg=(e&&e.message)?e.message:String(e);const st=(e&&e.stack)?("\n"+e.stack):"";sErr("Failed to analyze: "+msg+st);sLdD(false)}
+    }catch(e){sErr("Failed to analyze. ESPN data may not be available.");sLdD(false)}
   },[]);
 
   const batchAn=useCallback(async()=>{

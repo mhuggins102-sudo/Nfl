@@ -494,6 +494,17 @@ function computeWPSeries(d){
 
   const plays=sortPlaysChrono(playsRaw);
 
+  // Prefer ESPN win probability when available (0-1 home win pct)
+  const wpMap=new Map();
+  const wpArr=d?.winprobability||d?.winProbability||[];
+  if(Array.isArray(wpArr)){
+    for(const w of wpArr){
+      const pid=(w?.playId!=null)?String(w.playId):null;
+      const hp=w?.homeWinPercentage;
+      if(pid && typeof hp==="number") wpMap.set(pid, hp/100);
+    }
+  }
+
   // Plays to skip entirely (they don't affect game state)
   const SKIP_TYPES=new Set([
     "timeout","end period","end of half","end of game","coin toss",
@@ -524,7 +535,9 @@ function computeWPSeries(d){
       typeText.includes("two-point");
     const effectivePoss=isNeutral?null:possIsHome;
 
-    const wp=wpHomeFromState({
+    const pid = (p.id!=null)?String(p.id):null;
+    const espnWp = pid? wpMap.get(pid) : null;
+    const wp = (typeof espnWp==="number") ? espnWp : wpHomeFromState({
       homeScore:lastScore.homeScore,
       awayScore:lastScore.awayScore,
       possIsHome:effectivePoss,
@@ -643,7 +656,7 @@ function computeExcFromWP(g,d,wpStats){
 
   const swing01 = scale01(wpStats.crosses50 + 1.5*wpStats.crosses4060, 1, 10);
 
-  const clutch01 = scale01((wpStats.lateSumAbsDelta ?? 0) + 2.0*(wpStats.lateMaxAbsDelta ?? 0), 0.15, 1.10);
+  const clutch01 = scale01(wpStats.lateSumAbsDelta + 2.0*wpStats.lateMaxAbsDelta, 0.15, 1.10);
 
   const doubt01 = scale01(wpStats.doubtFrac, 0.25, 0.85);
 
@@ -671,7 +684,7 @@ function computeExcFromWP(g,d,wpStats){
     max:15,
     name:"Clutch Time",
     desc:"Late leverage (final 8:00 of 4Q + OT), where changes are most meaningful",
-    detail:`Late Σ|ΔWP|=${(wpStats.lateSumAbsDelta ?? 0).toFixed(2)}, late peak=${(wpStats.lateMaxAbsDelta ?? 0).toFixed(2)}`
+    detail:`Late Σ|ΔWP|=${wpStats.lateSumAbsDelta.toFixed(2)}, late peak=${wpStats.lateMaxAbsDelta.toFixed(2)}`
   };
   const control = {
     score: scoreFrom01(doubt01, 10),
@@ -909,16 +922,23 @@ export function buildSummaryData(g,d,exc){
     const txt=normSpace(p.text||p.shortText||"");
     const lo=txt.toLowerCase();
     const ty=(p.type?.text||"").toLowerCase();
+    if(lo.includes("(no play)")) continue;
     const yds=p.statYardage||0;
     const per=p.period?.number||0;
     const clk=p.clock?.displayValue||"";
     const team=p.team?.abbreviation||p._driveTeamId||"";
     if(lo.includes("intercept")||ty.includes("interception")){
       notablePlays.push({type:"INT",text:txt,period:per,clock:clk,team,yds});
-    } else if(lo.includes("fumble")&&(lo.includes("recovered by")||lo.includes("forced by")||lo.includes("fumbles"))){
-      notablePlays.push({type:"FUM",text:txt,period:per,clock:clk,team,yds});
-    } else if((lo.includes("4th")&&lo.includes("pass complete"))||(lo.includes("4th")&&lo.includes("rush")&&!lo.includes("no gain"))){
-      notablePlays.push({type:"4TH_CONV",text:txt,period:per,clock:clk,team,yds});
+    } else if(lo.includes("fumble")){
+      // Only treat as a turnover if the recovery team is different than the offense team.
+      const mrec = txt.match(/recovered by\s+([A-Z]{2,4})\b/i);
+      const rec = mrec ? mrec[1] : null;
+      if(rec && team && rec !== team){
+        notablePlays.push({type:"FUM",text:txt,period:per,clock:clk,team,yds,recoveredBy:rec});
+      }
+    } else if(/4th\s+and/i.test(lo) && !ty.includes("punt") && !ty.includes("field goal")){
+      // Include all 4th-down attempts; success/fail is inferred later.
+      notablePlays.push({type:"4TH_ATT",text:txt,period:per,clock:clk,team,yds});
     } else if(ty.includes("turnover on downs")||lo.includes("turnover on downs")){
       notablePlays.push({type:"4TH_FAIL",text:txt,period:per,clock:clk,team,yds});
     } else if(lo.includes("sacked")&&(lo.includes("3rd")||per>=4)){
