@@ -1283,6 +1283,7 @@ export function buildSummaryData(g,d,exc){
   return{
     matchup:`${tn(g.at)} at ${tn(g.ht)}`,
     awayTeam:g.at,homeTeam:g.ht,
+    homeDivision:getDiv(g.ht),awayDivision:getDiv(g.at),
     homeTeamId:homeId,
     awayTeamId:(()=>{const comp=d?.header?.competitions?.[0];const away=comp?.competitors?.find(c=>c.homeAway==="away");return away?.team?.id;})(),
     awayName:tn(g.at),homeName:tn(g.ht),

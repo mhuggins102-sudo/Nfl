@@ -957,7 +957,7 @@ function App(){
 }
 
 function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
-  const{exc,kp,box,stats,pStats,wp}=d;const og=oGrade(exc.total);
+  const{exc,kp,box,stats,pStats,wp,wp2}=d;const og=oGrade(exc.total);
   const date=new Date(g.date).toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
   const tags={td:["TD","t-td"],fg:["FG","t-cl"],to:["TURNOVER","t-to"],bg:["BIG PLAY","t-bg"],cl:["CLUTCH","t-cl"],sp:["SPECIAL","t-sp"],"4d":["4TH DOWN","t-bg"]};
   const passCols=["C/ATT","YDS","AVG","TD","INT","QBR"];
