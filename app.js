@@ -68,32 +68,22 @@ function _humanizePlay(raw){
 // Takes the raw play text plus context (score, time, teams)
 function _describePlay(raw, ctx){
   let text=_humanizePlay(raw);
-  if(!text)return"";
-  // ctx: {period, clock, homeScore, awayScore, homeName, awayName, isScoring}
+  if(!text) return "";
+  // ctx: {period, clock, homeScore, awayScore, homeName, awayName}
   if(ctx){
-    const per=ctx.period<=4?`Q${ctx.period}`:"OT";
+    const per = (ctx.period && ctx.period<=4) ? `Q${ctx.period}` : "OT";
     const parts=[];
     if(ctx.clock) parts.push(`with ${ctx.clock} left in the ${per}`);
-
-    // Only claim a play "gave X a lead" / "tied the game" if it was a scoring snap.
-    if(ctx.homeScore!=null && ctx.awayScore!=null){
-      const hs=ctx.homeScore, as=ctx.awayScore;
-      if(ctx.isScoring){
-        const leader=hs>as?ctx.homeName:hs<as?ctx.awayName:null;
-        const high=Math.max(hs,as), low=Math.min(hs,as);
-        if(leader) parts.push(`giving ${leader} a ${high}-${low} lead`);
-        else parts.push(`tying the game at ${high}`);
-      } else {
-        // Neutral score context without implying causality
-        if(hs!==as) parts.push(`with the score ${Math.max(hs,as)}-${Math.min(hs,as)}`);
-        else parts.push(`with the score tied ${hs}-${as}`);
-      }
+    if(ctx.homeScore!=null && ctx.awayScore!=null && ctx.homeName && ctx.awayName){
+      if(ctx.homeScore>ctx.awayScore) parts.push(`${ctx.homeName} led ${ctx.homeScore}-${ctx.awayScore}`);
+      else if(ctx.awayScore>ctx.homeScore) parts.push(`${ctx.awayName} led ${ctx.awayScore}-${ctx.homeScore}`);
+      else parts.push(`score tied ${ctx.homeScore}-${ctx.awayScore}`);
     }
-
-    if(parts.length) text+=`, ${parts.join(", ")}`;
+    if(parts.length) text += `, ${parts.join(", ")}`;
   }
   return text;
 }
+
 
 function _pick(arr,seed){if(!arr.length)return"";return arr[Math.abs(seed)%arr.length];}
 function _qLabel(p){return p<=4?`Q${p}`:"OT";}
@@ -531,7 +521,11 @@ function CategoryModal({cat,k,onClose,g,wpStats,enrichedPlays,sumData,wpSeries})
       else explanation=`This was a quieter game than most, with less WP movement than a typical matchup.`;
       if(topPlay){
         const swingPct=Math.round((maxAbs||0)*100);
-        const playDesc=_describePlay(topPlay.text,{ period:topPlay.period, clock:topPlay.clock, homeScore:topPlay.homeScore, awayScore:topPlay.awayScore, homeName:homeN, awayName:awayN, isScoring:!!topPlay.isScoring });
+        const playDesc=_describePlay(topPlay.text,{
+          period:topPlay.period, clock:topPlay.clock,
+          homeScore:topPlay.homeScore, awayScore:topPlay.awayScore,
+          homeName:homeN, awayName:awayN
+        });
         if(playDesc) explanation+=` The biggest single-play swing was ${swingPct}%, on ${playDesc}.`;
         else explanation+=` The peak swing was ${swingPct}%.`;
       }

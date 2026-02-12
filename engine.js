@@ -75,6 +75,11 @@ function gameElapsedSec(period, clock){
   }
   return base + elIn;
 }
+
+function clockToMinutes(period, clock){
+  const el = gameElapsedSec(period, clock);
+  return el==null ? null : (el/60);
+}
 function gameRemainingSec(period, clock){
   const p=period||1;
   const rem=parseClockToSeconds(clock);
@@ -476,16 +481,27 @@ function sortPlaysChrono(plays){
 }
 
 export function playTag(text,type){
-  const lo=(text||"").toLowerCase();
+  // Accept either a play object or a string. Prefer textual fields from ESPN play objects.
+  let s = "";
+  if(typeof text === "string") s = text;
+  else if(text && typeof text === "object"){
+    s = text.text || text.shortText || text.description || text.playText || "";
+  } else if(text != null) {
+    s = String(text);
+  }
+  const lo=(s||"").toLowerCase();
   const ty=(type||"").toLowerCase();
+  if(lo.includes("no play")) return ""; // nullified; don't tag
   if(lo.includes("intercept")||ty.includes("interception")) return "TO";
   if(lo.includes("fumble")) return "TO";
   if(lo.includes("turnover on downs")||ty.includes("turnover on downs")) return "TO";
   if(lo.includes("blocked")&&(lo.includes("punt")||lo.includes("field goal"))) return "SP";
   if(lo.includes("safety")||ty.includes("safety")) return "SP";
-  if(ty.includes("missed field goal")||lo.includes("missed")) return "CL";
+  // Treat missed FGs as clutch/chaos moments
+  if(ty.includes("missed field goal")||lo.includes("field goal no good")||lo.includes("missed field goal")) return "CL";
   return "";
 }
+
 
 function computeWPSeries(d){
   const homeId=getHomeTeamId(d);
