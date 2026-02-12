@@ -275,71 +275,52 @@ export function getAllPlays(d){
 function normSpace(s){return String(s||"").replace(/\s+/g," ").trim();}
 
 export function extractKP(d){
-  const plays=sortPlaysChrono(getAllPlays(d));
-  const out=[];
-  const seen=new Set();
-
-  const isNoPlay=p=>{
-    const t=String(p.text||"");
-    return t.includes("(No Play)") || t.toLowerCase().includes(" no play");
-  };
-  const isDeadEvent=p=>{
-    const ty=(p.type?.text||"").toLowerCase();
-    const tx=(p.text||"").toLowerCase();
-    if(ty==="timeout"||ty==="two-minute warning") return true;
-    if(tx.startsWith("end quarter")||tx.startsWith("end game")) return true;
-    return false;
-  };
-  const isExtraPoint=p=>{
-    const ty=(p.type?.text||"").toLowerCase();
-    return ty.includes("extra point")||ty.includes("two-point");
-  };
-
+  const plays=getAllPlays(d);
+  const homeId=getHomeTeamId(d);
+  const cats=[];
   for(const p of plays){
-    if(isDeadEvent(p) || isNoPlay(p)) continue;
-
-    const raw=String(p.text||"");
+    const raw=p.text||"";
     const lo=raw.toLowerCase();
     const ty=(p.type?.text||"").toLowerCase();
     const y=p.statYardage||0;
     const period=p.period?.number||0;
     const clock=p.clock?.displayValue||"";
 
-    let tag=null;
+    // SKIP plays with "No Play" (penalty nullified)
+    if(lo.includes("no play")||ty.includes("penalty")) continue;
 
-    // All scoring plays (exclude PAT/2PT attempts)
-    if(p.scoringPlay && !isExtraPoint(p)){
-      if(lo.includes("touchdown")||ty.includes("touchdown")) tag="TD";
-      else if(ty.includes("field goal")||lo.includes("field goal")) tag="FG";
-      else if(lo.includes("safety")||ty.includes("safety")) tag="SP";
-      else tag="SC";
-    }
+    let tag=null;
+    // Scoring plays (TD, FG, safety)
+    if(lo.includes("touchdown")||lo.includes(" td ")||ty.includes("touchdown")) tag="TD";
+    else if(ty.includes("field goal")&&!ty.includes("missed")&&lo.includes("good")) tag="FG";
+    else if(lo.includes("safety")||ty.includes("safety")) tag="SP";
     // Turnovers
     else if(lo.includes("intercept")||ty.includes("interception")) tag="TO";
     else if(lo.includes("fumble")&&(lo.includes("recovered")||lo.includes("forced")||lo.includes("fumbles"))) tag="TO";
-    else if(ty.includes("turnover on downs")||lo.includes("turnover on downs")) tag="TO";
-    // 4th down attempts (not punts/FGs)
-    else if(p.start?.down===4 && !ty.includes("punt") && !ty.includes("field goal")) tag="4D";
-    // Missed FG (rarely exciting, but can matter)
-    else if(ty.includes("missed field goal")||lo.includes("field goal no good")) tag="CL";
-    // Big plays (40+ yards, not punts/kickoffs)
-    else if(y>=40 && !ty.includes("punt") && !ty.includes("kickoff")) tag="BG";
+    else if(ty.includes("turnover on downs")) tag="TO";
+    // Blocked kicks
+    else if(lo.includes("blocked")&&(lo.includes("punt")||lo.includes("field goal")||lo.includes("kick"))) tag="SP";
+    // 4th down attempts (success or failure)
+    else if(lo.includes("4th")&&(lo.includes("pass complete")||lo.includes("rush"))) tag="4D";
+    // Missed FG
+    else if(ty.includes("missed field goal")||lo.includes("field goal no good")||lo.includes("missed")) tag="CL";
+    // Big plays (40+ yards, not punts/kicks)
+    else if(y>=40&&!lo.includes("punt")&&!lo.includes("kickoff")) tag="BG";
 
-    if(!tag) continue;
-
-    const hs=p.homeScore!=null?+p.homeScore:null;
-    const as=p.awayScore!=null?+p.awayScore:null;
-    const startPos=p.start?.possessionText||"";
-    const endPos=p.end?.possessionText||"";
-    const txt=titleizePlay(raw);
-
-    const k=tag+"|"+period+"|"+clock+"|"+txt.slice(0,60);
-    if(seen.has(k)) continue;
-    seen.add(k);
-
-    out.push({tag,text:txt,period,clock,homeScore:hs,awayScore:as,startPos,endPos,downDist:(p.start?.downDistanceText||"")});
+    if(tag){
+      // Get score after play
+      const hs=p.homeScore!=null?+p.homeScore:null;
+      const as=p.awayScore!=null?+p.awayScore:null;
+      cats.push({tag,text:titleizePlay(raw),period,clock,homeScore:hs,awayScore:as});
+    }
   }
-  return out.slice(0,30);
+  const uniq=[];const seen=new Set();
+  for(const x of cats){
+    const k=x.tag+"|"+x.period+"|"+x.clock+"|"+(x.text||"").slice(0,40);
+    if(seen.has(k))continue;
+    seen.add(k);uniq.push(x);
+  }
+  return uniq.slice(0,20);
 }
 
 // ---------- Context scoring (rivalry / stakes) ----------
@@ -511,68 +492,61 @@ function computeWPSeries(d){
   const playsRaw=getAllPlays(d);
   if(!playsRaw.length || !homeId) return {series:[], stats:null};
 
-  // Always sort by sequenceNumber (chronological)
   const plays=sortPlaysChrono(playsRaw);
 
-  // ESPN sometimes provides a play-level WP series (preferred)
-  const wpList=Array.isArray(d?.winprobability)?d.winprobability:[];
-  const wpByPlayId=new Map();
-  for(const w of wpList){
-    if(w && w.playId!=null && w.homeWinPercentage!=null){
-      wpByPlayId.set(String(w.playId), +w.homeWinPercentage);
-    }
+  // ESPN provides a play-level WP series in summary JSON (winprobability[]).
+  // We map by playId -> homeWinPercentage. Some entries are pregame; ignore those if they don't match any play.id.
+  const wpMap=new Map();
+  const wpArr=(d && d.winprobability) ? d.winprobability : [];
+  for(const w of (wpArr||[])){
+    const pid=String(w.playId||"");
+    const p=Number(w.homeWinPercentage);
+    if(pid && Number.isFinite(p)) wpMap.set(pid, p);
   }
 
-  // Detect common pattern: wpList[0] is a pre-game state not tied to a play,
-  // and wpList[1].playId equals the first play id.
-  const hasPregame = wpList.length===plays.length+1 &&
-    wpList[1]?.playId!=null && String(wpList[1].playId)===String(plays[0]?.id);
-
-  // Plays to skip entirely (they don't affect game state and shouldn't be in WP curve)
+  // Plays to skip entirely (they don't affect game state)
   const SKIP_TYPES=new Set([
     "timeout","end period","end of half","end of game","coin toss",
     "two-minute warning","official timeout","tv timeout"
   ]);
 
   let lastScore={homeScore:0,awayScore:0};
-  let prevWp=0.5;
+  let prevWp=null;
+
   const series=[];
-  let firstSet=false;
-  let idx=0;
+  let sumAbs=0, maxAbs=0, crosses50=0, lastSide=null;
+  let usedEspn=0, usedHeur=0;
 
   for(const p of plays){
     const per=p.period?.number||1;
     const clk=p.clock?.displayValue||p.clock?.value||p.clock;
     const typeText=(p.type?.text||"").toLowerCase();
+    const textRaw=(p.text||p.shortText||"");
 
+    // Skip non-play events
     if(SKIP_TYPES.has(typeText)) continue;
 
-    // Skip nullified snaps (penalty 'No Play')
-    const rawTxt=String(p.text||"");
-    if(rawTxt.includes("(No Play)") || rawTxt.toLowerCase().includes(" no play")) continue;
+    // Skip nullified snaps (penalty "No Play")
+    if(/\bNo Play\b/i.test(textRaw)) continue;
 
     const sc=getScoresFromPlay(p,lastScore);
     if(sc) lastScore=sc;
 
-    const possTeamId=getPossTeamId(p);
-    const possIsHome=(possTeamId==null)?null:(possTeamId===homeId);
+    // Determine "scoring snap" (exclude PAT/2PT)
+    const isPAT=typeText.includes("extra point")||typeText.includes("two-point");
+    const isScoring=!!p.scoringPlay && !isPAT;
 
-    // Prefer ESPN WP when we can match by playId.
-    let wpESPN=null;
+    // Pull ESPN WP when available for this play id; otherwise fall back.
     const pid=String(p.id||"");
-    if(wpByPlayId.has(pid)) wpESPN=wpByPlayId.get(pid);
-    else if(hasPregame){
-      const w=wpList[idx+1];
-      if(w && String(w.playId)===pid && w.homeWinPercentage!=null) wpESPN=+w.homeWinPercentage;
-    }
+    let wp=wpMap.has(pid) ? wpMap.get(pid) : null;
+    let wpSource="espn";
+    if(wp==null || !Number.isFinite(wp)){
+      // Fallback heuristic model (score/time/possession)
+      const possTeamId=getPossTeamId(p);
+      const possIsHome=(possTeamId==null)?null:(possTeamId===homeId);
 
-    let wp;
-    if(wpESPN!=null && Number.isFinite(wpESPN)){
-      wp=clamp(wpESPN,0,1);
-    }else{
-      // For kickoffs/PATs, nullify possession to prevent artificial swings in the fallback heuristic
-      const isNeutral=typeText.includes("kickoff")||typeText.includes("extra point")||
-        typeText.includes("two-point");
+      // For kickoffs/punts/PATs, nullify possession to prevent artificial swings
+      const isNeutral=typeText.includes("kickoff")||typeText.includes("punt")||isPAT;
       const effectivePoss=isNeutral?null:possIsHome;
 
       wp=wpHomeFromState({
@@ -582,40 +556,60 @@ function computeWPSeries(d){
         period:per,
         clock:clk
       });
+      wpSource="heuristic";
+      usedHeur++;
+    } else {
+      usedEspn++;
     }
 
-    if(!firstSet){prevWp=wp;firstSet=true;}
+    // Initialize prevWp on the first datapoint
+    if(prevWp==null) prevWp=wp;
+
     const delta=wp-prevWp;
     const absDelta=Math.abs(delta);
-    prevWp=wp;
 
-    const rem=gameRemainingSec(per, clk);
-    const elapsed=gameElapsedSec(per, clk);
-    const text=normSpace(p.text||p.shortText||p.type?.text||"");
+    // Track stats
+    sumAbs+=absDelta;
+    if(absDelta>maxAbs) maxAbs=absDelta;
+    const side=wp>=0.5?"home":"away";
+    if(lastSide && side!==lastSide) crosses50++;
+    lastSide=side;
+
+    // Basic tagging for "key play" surfacing
+    const tag=playTag(p, typeText);
 
     series.push({
-      wp, delta, absDelta,
+      id:pid,
       period:per,
       clock:clk,
-      remSec:rem,
-      tMin:(elapsed!=null?elapsed/60:null),
-      text,
-      teamId:possTeamId,
+      tMin:clockToMinutes(per,clk),
+      wp,
+      delta,
+      absDelta,
       homeScore:lastScore.homeScore,
       awayScore:lastScore.awayScore,
-      type:(p.type?.text||""),
-      tag:playTag(p.text||p.shortText||"", p.type?.text||""),
-      playId:pid,
-      downDist:(p.start?.downDistanceText||""),
-      startPos:(p.start?.possessionText||""),
-      endPos:(p.end?.possessionText||"")
+      text:textRaw,
+      type:typeText,
+      tag,
+      isScoring,
+      wpSource
     });
 
-    idx++;
+    prevWp=wp;
   }
 
-  if(series.length<10) return {series, stats:null};
-  return {series, stats: computeWPStats(series)};
+  // Derive "biggest swings" candidates using a stricter filter so we don't highlight junk.
+  // (Chart can still show every point; this only affects which plays get picked for blurbs.)
+  const stats={
+    sumAbsDelta:sumAbs,
+    maxAbsDelta:maxAbs,
+    crosses50,
+    usedEspn,
+    usedHeuristic:usedHeur,
+    espnFrac:(usedEspn+usedHeur)?(usedEspn/(usedEspn+usedHeur)):0
+  };
+
+  return {series, stats};
 }
 
 // Compute statistics from WP series
@@ -799,36 +793,11 @@ function classifyArchetype(wpSeries){
 
 function getTopLeveragePlays(wpSeries, n=6){
   if(!wpSeries || wpSeries.length<2) return [];
-
-  const isNoPlayTxt=t=>{
-    const s=String(t||"");
-    return s.includes("(No Play)") || s.toLowerCase().includes(" no play");
-  };
-
-  const isJunkEvent=x=>{
-    const ty=String(x.type||"").toLowerCase();
-    const tx=String(x.text||"").toLowerCase();
-    if(!tx) return true;
-    if(tx.startsWith("end quarter")||tx.startsWith("end game")) return true;
-    if(ty==="timeout"||ty==="two-minute warning") return true;
-    // Kickoffs are usually not informative for leverage; keep only if they are "special"
-    if(ty==="kickoff"){
-      const special = tx.includes("onside") || tx.includes("returned") || tx.includes("touchdown") || tx.includes("fumble");
-      if(!special) return true;
-    }
-    // Extra points are noise for leverage
-    if(ty.includes("extra point")||ty.includes("two-point")) return true;
-    // Nullified plays
-    if(isNoPlayTxt(tx)) return true;
-    return false;
-  };
-
   const scored = wpSeries
     .map((x,i)=>({...x, idx:i}))
-    .filter(x=>x.absDelta!=null && !isJunkEvent(x))
+    .filter(x=>x.absDelta!=null && x.text)
     .sort((a,b)=>b.absDelta-a.absDelta)
     .slice(0, n);
-
   scored.sort((a,b)=>a.idx-b.idx);
   return scored.map(x=>({
     period:x.period,
@@ -842,9 +811,8 @@ function getTopLeveragePlays(wpSeries, n=6){
     text:titleizePlay(x.text),
     type:x.type||"",
     tag:x.tag||"",
-    startPos:x.startPos||"",
-    endPos:x.endPos||"",
-    downDist:x.downDist||""
+    isScoring:!!x.isScoring,
+    wpSource:x.wpSource||""
   }));
 }
 
