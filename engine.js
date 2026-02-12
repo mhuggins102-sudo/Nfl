@@ -71,7 +71,7 @@ function gameElapsedSec(period, clock){
   if(p<=4){
     base=(p-1)*900;
   }else{
-    base=3600 + (p-5)*600;
+    base=3600 + (p-5)*periodLengthSec(5);
   }
   return base + elIn;
 }
@@ -469,18 +469,31 @@ function sortPlaysChrono(plays){
     const per=p.period?.number||1;
     const clk=p.clock?.displayValue||p.clock?.value||p.clock;
     const el=gameElapsedSec(per, clk);
-    return {p, k: (el==null? 1e12 : el)};
+    // sequenceNumber is monotonic within ESPN pbp and helps order edge cases (OT vs late Q4, null clocks)
+    const seq = (p.sequenceNumber!=null)? Number(p.sequenceNumber) : (p.sequence!=null?Number(p.sequence):0);
+    const base = (el==null? 1e12 : el);
+    return {p, k: base, seq: (isFinite(seq)?seq:0)};
   });
-  withKey.sort((a,b)=>a.k-b.k);
+  withKey.sort((a,b)=>{
+    if(a.k!==b.k) return a.k-b.k;
+    return a.seq-b.seq;
+  });
   return withKey.map(x=>x.p);
 }
+
 
 export function playTag(text,type){
   const lo=(text||"").toLowerCase();
   const ty=(type||"").toLowerCase();
   if(lo.includes("intercept")||ty.includes("interception")) return "TO";
-  if(lo.includes("fumble")) return "TO";
   if(lo.includes("turnover on downs")||ty.includes("turnover on downs")) return "TO";
+  if(lo.includes("fumble")){
+    // Only tag as turnover if it likely changed possession.
+    // ESPN play text often includes "RECOVERED by <TEAM>-<PLAYER>" for true changes.
+    const recBy = lo.includes("recovered by");
+    const selfRec = /\band\s+recovers\b|\brecovers\s+at\b/i.test(text||"");
+    if(recBy && !selfRec) return "TO";
+  }
   if(lo.includes("blocked")&&(lo.includes("punt")||lo.includes("field goal"))) return "SP";
   if(lo.includes("safety")||ty.includes("safety")) return "SP";
   if(ty.includes("missed field goal")||lo.includes("missed")) return "CL";
@@ -501,13 +514,7 @@ function computeWPSeries(d){
     for(const w of wpArr){
       const pid=(w?.playId!=null)?String(w.playId):null;
       const hp=w?.homeWinPercentage;
-      if(pid && typeof hp==="number"){
-        // ESPN feeds vary: some provide 0..1, others 0..100.
-        let v = hp;
-        if(v > 1.01) v = v/100;
-        v = Math.max(0, Math.min(1, v));
-        wpMap.set(pid, v);
-      }
+      if(pid && typeof hp==="number") let v=hp; if(v>1.01) v=v/100; v=Math.max(0,Math.min(1,v)); wpMap.set(pid, v);
     }
   }
 
@@ -526,6 +533,11 @@ function computeWPSeries(d){
     const per=p.period?.number||1;
     const clk=p.clock?.displayValue||p.clock?.value||p.clock;
     const typeText=(p.type?.text||"").toLowerCase();
+    const rawText=(p.text||p.shortText||"");
+    // Skip plays nullified/aborted so they don't create phantom WP swings
+    if(typeText.includes("aborted")) continue;
+    if(/\bpenalty\b/i.test(rawText) && !/declined/i.test(rawText) && !/offsetting/i.test(rawText) && !/no play/i.test(rawText)) continue;
+    if(/\(\s*no play\s*\)/i.test(rawText) || typeText.includes("no play")) continue;
 
     // Skip non-game events
     if(SKIP_TYPES.has(typeText)) continue;
@@ -577,6 +589,161 @@ function computeWPSeries(d){
 
   if(series.length<10) return {series, stats:null};
   return {series, stats: computeWPStats(series)};
+}
+
+
+// Alternative WP model (heuristic+) that uses additional state when available.
+// This is NOT ESPN/nflfastR; it's a more realistic fallback than score/time/possession alone.
+function wpHomeFromStatePlus(state){
+  const {homeScore, awayScore, possIsHome, period, clock, yardline100, down, distance} = state||{};
+  const sd = (homeScore||0) - (awayScore||0); // home score diff
+  const rem = gameRemainingSec(period||1, clock);
+  const remFrac = (rem==null)?0.5:Math.max(0, Math.min(1, rem/3600)); // 1 early, 0 late
+  // As time runs out, each point matters more.
+  const timeScale = 1.0 + 2.2*(1-remFrac);
+
+  // Base score effect (roughly: 7 pts ~ big shift late, modest early)
+  let logit = (sd/7)*1.15*timeScale;
+
+  // Possession effect (small early, larger late)
+  if(possIsHome===true) logit += 0.20*timeScale;
+  else if(possIsHome===false) logit -= 0.20*timeScale;
+
+  // Field position: yardline_100 is distance from opponent endzone (0 at goal line, 100 at own goal line)
+  if(typeof yardline100==="number" && isFinite(yardline100)){
+    const inOppTerr = (100-yardline100); // higher is better
+    // Normalize: midfield ~50, goal-to-go ~90
+    const fp = (inOppTerr-50)/50; // -1..+1
+    logit += 0.35*fp*timeScale;
+  }
+
+  // Down & distance: worse situations reduce WP a bit
+  if(typeof down==="number" && down>=3 && down<=4 && typeof distance==="number" && isFinite(distance)){
+    const d = Math.min(20, Math.max(0, distance));
+    const downPenalty = (down===3?0.10:0.18) * (d/10);
+    // apply to offense; flip by possession
+    if(possIsHome===true) logit -= downPenalty*timeScale;
+    else if(possIsHome===false) logit += downPenalty*timeScale;
+  }
+
+  // Overtime: treat as tighter (closer to 50) unless big score diff (rare)
+  if((period||1)>4){
+    logit *= 0.70;
+  }
+
+  const wp = 1/(1+Math.exp(-logit));
+  return Math.max(0, Math.min(1, wp));
+}
+
+function teamIdToAbbrMap(d){
+  const m=new Map();
+  const comps=d?.header?.competitions?.[0]?.competitors||d?.competitions?.[0]?.competitors||[];
+  for(const c of comps){
+    const id=c?.team?.id;
+    const ab=c?.team?.abbreviation;
+    if(id!=null && ab) m.set(String(id), ab);
+  }
+  return m;
+}
+
+function parseYardline100(yardLine, possAbbr){
+  // yardLine like "KC 40" or "BUF 25"
+  if(!yardLine || typeof yardLine!=="string" || !possAbbr) return null;
+  const m=yardLine.trim().match(/^([A-Z]{2,3})\s+(\d{1,2})$/);
+  if(!m) return null;
+  const side=m[1], y=parseInt(m[2],10);
+  if(!isFinite(y)) return null;
+  // Convert to yards from opponent endzone (yardline_100)
+  // If ball is on offense side: distance to opponent endzone = 100 - y
+  // If ball is on opponent side: distance to opponent endzone = y
+  return (side===possAbbr) ? (100 - y) : y;
+}
+
+function computeWPSeriesPlus(d){
+  const homeId=getHomeTeamId(d);
+  const playsRaw=getAllPlays(d);
+  if(!playsRaw.length || !homeId) return {series:[], stats:null};
+
+  const plays=sortPlaysChrono(playsRaw);
+  const id2abbr=teamIdToAbbrMap(d);
+
+  const SKIP_TYPES=new Set([
+    "timeout","end period","end of half","end of game","coin toss",
+    "two-minute warning","official timeout","tv timeout"
+  ]);
+
+  let lastScore={homeScore:0,awayScore:0};
+  let prevWp=0.5;
+  const series=[];
+  let firstSet=false;
+
+  for(const p of plays){
+    const per=p.period?.number||1;
+    const clk=p.clock?.displayValue||p.clock?.value||p.clock;
+    const typeText=(p.type?.text||"").toLowerCase();
+    const rawText=(p.text||p.shortText||"");
+    // Skip plays nullified/aborted so they don't create phantom WP swings
+    if(typeText.includes("aborted")) continue;
+    if(/\bpenalty\b/i.test(rawText) && !/declined/i.test(rawText) && !/offsetting/i.test(rawText) && !/no play/i.test(rawText)) continue;
+    if(/\(\s*no play\s*\)/i.test(rawText) || typeText.includes("no play")) continue;
+    if(SKIP_TYPES.has(typeText)) continue;
+
+    const sc=getScoresFromPlay(p,lastScore);
+    if(sc) lastScore=sc;
+
+    const possTeamId=getPossTeamId(p);
+    const possIsHome=(possTeamId==null)?null:(possTeamId===homeId);
+    const isNeutral=typeText.includes("kickoff")||typeText.includes("extra point")||typeText.includes("two-point");
+    const effectivePoss=isNeutral?null:possIsHome;
+
+    const possAbbr = possTeamId!=null ? id2abbr.get(String(possTeamId)) : null;
+    const yardLine = p?.start?.yardLine || p?.start?.text || p?.start?.yardline;
+    const yl100 = parseYardline100(yardLine, possAbbr);
+
+    const down = p?.start?.down ?? p?.down ?? null;
+    const distance = p?.start?.distance ?? p?.start?.yardsToGo ?? p?.distance ?? null;
+
+    const wp = wpHomeFromStatePlus({
+      homeScore:lastScore.homeScore,
+      awayScore:lastScore.awayScore,
+      possIsHome:effectivePoss,
+      period:per,
+      clock:clk,
+      yardline100: yl100,
+      down: (typeof down==="number"?down:null),
+      distance: (typeof distance==="number"?distance:null),
+    });
+
+    if(!firstSet){prevWp=wp;firstSet=true;}
+    const delta=wp-prevWp;
+    const absDelta=Math.abs(delta);
+    prevWp=wp;
+
+    const rem=gameRemainingSec(per, clk);
+    const elapsed=gameElapsedSec(per, clk);
+    const text=normSpace(p.text||p.shortText||p.type?.text||"");
+
+    series.push({
+      wp, delta, absDelta,
+      period:per,
+      clock:clk,
+      remSec:rem,
+      tMin:(elapsed!=null?elapsed/60:null),
+      text,
+      teamId:possTeamId,
+      homeScore:lastScore.homeScore,
+      awayScore:lastScore.awayScore,
+      type:(p.type?.text||""),
+      tag:playTag(rawText, p.type?.text||"")
+    });
+  }
+
+  if(series.length<10) return {series, stats:null};
+  return {series, stats: computeWPStats(series)};
+}
+
+export function getWPSeriesPlus(d){
+  return computeWPSeriesPlus(d);
 }
 
 // Compute statistics from WP series

@@ -1,6 +1,6 @@
 import{createElement as h,useState,useCallback,useEffect,useRef,Fragment}from"https://esm.sh/react@18.2.0";
 import{createRoot}from"https://esm.sh/react-dom@18.2.0/client";
-import{TEAMS,tn,TK,espnSB,espnSum,parseEv,computeExc,oGrade,gradeFor,extractKP,buildBox,buildStats,buildPlayerStats,buildSummaryData,getAllPlays,getWPSeries}from"./engine.js";
+import{TEAMS,tn,TK,espnSB,espnSum,parseEv,computeExc,oGrade,gradeFor,extractKP,buildBox,buildStats,buildPlayerStats,buildSummaryData,getAllPlays,getWPSeries,getWPSeriesPlus}from"./engine.js";
 
 const cc=c=>({s:"cs",a:"ca",b:"cb",c:"cc",d:"cd",f:"cf"}[c]||"");
 const bc=c=>({s:"bs",a:"ba",b:"bbl",c:"bc",d:"bd",f:"bf2"}[c]||"");
@@ -314,29 +314,43 @@ function buildRecap(sum){
 
 // ── WP Chart: vertical line on tap, bigger dots, OT x-axis fix ──
 
-function WPChart({series, mode, onModeChange, exc, topLev, homeTeam, awayTeam}){
+function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChange, exc, topLev, homeTeam, awayTeam}){
   const [tooltip,setTooltip]=useState(null);
   const [vLine,setVLine]=useState(null); // {x, wp, tMin, homeScore, awayScore}
 
-  if(!series||series.length<2){
+  const activeSeries = (modelSel==="Alt") ? (seriesAlt||[]) : (seriesE||[]);
+  const bothSeries = (modelSel==="Both");
+  if(!activeSeries||activeSeries.length<2){
     return h("div",{style:{color:"var(--text-3)",fontFamily:"JetBrains Mono",fontSize:".75rem"}},"Win probability data unavailable.");
   }
 
   // Determine max game time (OT extends past 60)
-  const maxTMin=Math.max(...series.filter(s=>s.tMin!=null).map(s=>s.tMin));
+  const allForExtent = bothSeries ? [...(seriesE||[]), ...(seriesAlt||[])] : activeSeries;
+  const maxTMin=Math.max(...allForExtent.filter(s=>s.tMin!=null).map(s=>s.tMin));
   const gameMaxMin=maxTMin>60?Math.ceil(maxTMin/5)*5:60;
 
   const W=860,H=200,pad=28;
   const toX=t=>pad+(t/gameMaxMin)*(W-2*pad);
   const toY=wp=>pad+(1-wp)*(H-2*pad);
 
-  const step=Math.max(1,Math.floor(series.length/500));
+  const step=Math.max(1,Math.floor(activeSeries.length/500));
   const pts=[];
-  for(let i=0;i<series.length;i+=step){
-    const s=series[i];
+  for(let i=0;i<activeSeries.length;i+=step){
+    const s=activeSeries[i];
     if(s&&s.tMin!=null&&s.wp!=null)pts.push([toX(s.tMin),toY(s.wp)]);
   }
   const path="M "+pts.map(p=>p[0].toFixed(2)+" "+p[1].toFixed(2)).join(" L ");
+
+  let pathAlt=null;
+  if(bothSeries && seriesAlt && seriesAlt.length>1){
+    const step2=Math.max(1,Math.floor(seriesAlt.length/500));
+    const pts2=[];
+    for(let i=0;i<seriesAlt.length;i+=step2){
+      const s=seriesAlt[i];
+      if(s&&s.tMin!=null&&s.wp!=null)pts2.push([toX(s.tMin),toY(s.wp)]);
+    }
+    if(pts2.length>1) pathAlt="M "+pts2.map(p=>p[0].toFixed(2)+" "+p[1].toFixed(2)).join(" L ");
+  }
 
   // Axis labels
   const axisLabels=[];
@@ -368,11 +382,11 @@ function WPChart({series, mode, onModeChange, exc, topLev, homeTeam, awayTeam}){
       });
     });
   }else if(mode==="Swings"){
-    for(let i=1;i<series.length;i++){
-      const a=series[i-1].wp,b=series[i].wp;
+    for(let i=1;i<activeSeries.length;i++){
+      const a=activeSeries[i-1].wp,b=activeSeries[i].wp;
       if(a==null||b==null)continue;
       if((a<0.5&&b>=0.5)||(a>=0.5&&b<0.5)){
-        const s=series[i];
+        const s=activeSeries[i];
         const per=s.period<=4?`Q${s.period}`:"OT";
         addDot(toX(s.tMin),toY(s.wp),5.5,"var(--blue)","rgba(61,142,212,.4)",{
           label:`${per} ${s.clock} — Lead change`,
@@ -383,7 +397,7 @@ function WPChart({series, mode, onModeChange, exc, topLev, homeTeam, awayTeam}){
       }
     }
   }else if(mode==="Chaos"){
-    for(const s of series){
+    for(const s of activeSeries){
       if(s.tag==="TO"||s.tag==="SP"){
         const per=s.period<=4?`Q${s.period}`:"OT";
         const lbl=s.tag==="TO"?"Turnover":"Special teams";
@@ -423,7 +437,7 @@ function WPChart({series, mode, onModeChange, exc, topLev, homeTeam, awayTeam}){
     // Otherwise, find nearest play in time for vertical line
     const clickTMin=((cx-pad)/(W-2*pad))*gameMaxMin;
     let nearest=null,nearDist=Infinity;
-    for(const s of series){
+    for(const s of activeSeries){
       if(s.tMin==null)continue;
       const d=Math.abs(s.tMin-clickTMin);
       if(d<nearDist){nearDist=d;nearest=s;}
@@ -441,7 +455,10 @@ function WPChart({series, mode, onModeChange, exc, topLev, homeTeam, awayTeam}){
     h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:"1rem",flexWrap:"wrap"}},
       h("div",{className:"sec-h",style:{borderBottom:"none",marginBottom:"0"}},`Win Probability (${homeName})`),
       h("div",{style:{display:"flex",alignItems:"center",gap:".5rem"}},
-        h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".65rem",letterSpacing:".08em",textTransform:"uppercase",color:"var(--text-3)"}},"Overlay"),
+        h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".65rem",letterSpacing:".08em",textTransform:"uppercase",color:"var(--text-3)"}},"Model"),
+        h("select",{value:modelSel,onChange:e=>{onModelChange(e.target.value);setTooltip(null);setVLine(null);},style:{background:"var(--bg-3)",border:"1px solid var(--border-1)",color:"var(--text-1)",padding:".35rem .5rem",fontFamily:"JetBrains Mono",fontSize:".7rem"}},
+          [ ["ESPN","ESPN"], ["Alt","Alt"], ["Both","Both"] ].map(o=>h("option",{key:o[0],value:o[1]},o[0]))),
+        h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".65rem",letterSpacing:".08em",textTransform:"uppercase",color:"var(--text-3)",marginLeft:".4rem"}},"Overlay"),
         h("select",{value:mode,onChange:e=>{onModeChange(e.target.value);setTooltip(null);setVLine(null);},style:{background:"var(--bg-3)",border:"1px solid var(--border-1)",color:"var(--text-1)",padding:".35rem .5rem",fontFamily:"JetBrains Mono",fontSize:".7rem"}},
           ["Leverage","Swings","Chaos","Clutch"].map(o=>h("option",{key:o,value:o},o))))),
     h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".6rem",color:"var(--text-4)",marginTop:".3rem",marginBottom:".2rem"}},
@@ -461,8 +478,9 @@ function WPChart({series, mode, onModeChange, exc, topLev, homeTeam, awayTeam}){
         ...qDividers.map((x,i)=>h("line",{key:`qd-${i}`,x1:x,y1:pad,x2:x,y2:H-pad,stroke:"rgba(136,146,164,.15)",strokeWidth:"1",strokeDasharray:"2 3"})),
         // Clutch zone (behind line)
         (mode==="Clutch"&&overlays.length)?overlays[0]:null,
-        // WP line
+        // WP line(s)
         h("path",{d:path,fill:"none",stroke:"rgba(232,236,240,.85)",strokeWidth:"2"}),
+        (pathAlt? h("path",{d:pathAlt,fill:"none",stroke:"rgba(61,142,212,.7)",strokeWidth:"2"}) : null),
         // Overlay dots
         ...(mode==="Clutch"?overlays.slice(1):overlays),
         // Vertical cursor line
@@ -718,8 +736,9 @@ function App(){
     sSelGame(g);sLdD(true);sDet(null);sErr(null);sSummary(null);sSumData(null);
     try{
       const d=await espnSum(g.id);const exc=computeExc(g,d);const kp=extractKP(d);const wp=getWPSeries(d);
+      const wp2=getWPSeriesPlus(d);
       const box=buildBox(d);const stats=buildStats(d);const pStats=buildPlayerStats(d);
-      sDet({exc,kp,box,stats,pStats,d,wp});sCache(p=>({...p,[g.id]:exc.total}));sLdD(false);
+      sDet({exc,kp,box,stats,pStats,d,wp,wp2});sCache(p=>({...p,[g.id]:exc.total}));sLdD(false);
       sSumLoading(true);
       const sd=buildSummaryData(g,d,exc);sSumData(sd);sSummary(buildRecap(sd));sSumLoading(false);
     }catch(e){sErr("Failed to analyze. ESPN data may not be available.");sLdD(false)}
@@ -783,6 +802,7 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
   const tags={td:["TD","t-td"],fg:["FG","t-cl"],to:["TURNOVER","t-to"],bg:["BIG PLAY","t-bg"],cl:["CLUTCH","t-cl"],sp:["SPECIAL","t-sp"],"4d":["4TH DOWN","t-bg"]};
   const passCols=["C/ATT","YDS","AVG","TD","INT","QBR"];
   const[wpMode,setWpMode]=useState("Leverage");
+  const[wpModel,setWpModel]=useState("ESPN");
   const[catModal,setCatModal]=useState(null);
   const rushCols=["CAR","YDS","AVG","TD","LONG"];
   const recCols=["REC","YDS","AVG","TD","LONG","TGTS"];
@@ -829,7 +849,7 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
         return h("div",{key:k,className:"gc",onClick:()=>setCatModal({k,cat:v}),style:{cursor:"pointer"}},
           h("div",{className:"gi"},h("h3",null,v.name),h("div",{className:"ds"},v.desc),h("div",{className:"dt"},v.detail),h("div",{className:"br"},h("div",{className:`bf ${bc(gr.c)}`,style:{width:`${pct}%`}}))),
           h("div",{className:`gbg ${cc(gr.c)}`},h("div",null,gr.g),h("div",{className:"pt"},`${v.score}/${v.max}`)))}))),
-    WPChart({series:wp?.series||[],mode:wpMode,onModeChange:setWpMode,exc,topLev:(sumData?.enrichedPlays||sumData?.topLeveragePlays||[]),homeTeam:g.ht,awayTeam:g.at}),
+    WPChart({seriesE:wp?.series||[],seriesAlt:wp2?.series||[],modelSel:wpModel,onModelChange:setWpModel,mode:wpMode,onModeChange:setWpMode,exc,topLev:(sumData?.enrichedPlays||sumData?.topLeveragePlays||[]),homeTeam:g.ht,awayTeam:g.at}),
     h("div",{className:"sec an a5"},h("div",{className:"sec-h"},"Game Recap"),
       h("div",{className:"wb"},sumLoading?h("p",{style:{fontStyle:"italic",color:"var(--text-3)"}},"Generating game recap..."):
         summary?summary.map((p,i)=>h("p",{key:i},p)):h("p",{style:{color:"var(--text-3)"}},"Recap unavailable."))),
