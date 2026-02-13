@@ -305,9 +305,20 @@ export function extractKP(d){
     else if(lo.includes("safety")||ty.includes("safety")) tag="SP";
     // Two-point conversions
     else if(ty.includes("two-point")||lo.includes("two-point")||lo.includes("2-point")) tag="TD";
-    // Turnovers
+    // Turnovers — must verify possession actually changed
     else if(lo.includes("intercept")||ty.includes("interception")) tag="TO";
-    else if(lo.includes("fumble")&&(lo.includes("recovered")||lo.includes("forced")||lo.includes("fumbles"))) tag="TO";
+    else if(lo.includes("fumble")){
+      // Only tag as turnover if recovered by a different team
+      const recBy=lo.includes("recovered by");
+      const selfRec=/\band\s+recovers\b|\brecovers\s+at\b|\brecovery\s+by\s+\S+\s+at\b/i.test(raw);
+      const driveTeam=(p._driveTeamId!=null)?String(p._driveTeamId):"";
+      const recMatch=raw.match(/recovered\s+by\s+([A-Z]{2,4})[\s-]/i)||raw.match(/RECOVERED\s+([A-Z]{2,4})\b/i);
+      const recTeamAbbr=recMatch?recMatch[1]:null;
+      const offTeam=p.team?.abbreviation||"";
+      if(recBy&&!selfRec&&recTeamAbbr&&offTeam&&recTeamAbbr!==offTeam) tag="TO";
+      else if(recBy&&!selfRec&&!offTeam) tag="TO"; // fallback if no team info
+      // If we can't determine, skip — don't tag self-recoveries
+    }
     else if(ty.includes("turnover on downs")) tag="TO";
     // Blocked kicks
     else if(lo.includes("blocked")&&(lo.includes("punt")||lo.includes("field goal")||lo.includes("kick"))) tag="SP";
@@ -334,15 +345,7 @@ export function extractKP(d){
     if(seen.has(k))continue;
     seen.add(k);uniq.push(x);
   }
-  // Sort by a priority that blends chronological order with impact:
-  // TDs/TOs first, then by WP swing, keeping chronological within tiers
-  const tagPriority={TD:3,TO:3,SP:2,FG:2,"4D":2,CL:1,BG:1};
-  uniq.sort((a,b)=>{
-    // High-WP-swing plays float up regardless of tag
-    const aImpact=(a.wpSwing>=0.08?1:0), bImpact=(b.wpSwing>=0.08?1:0);
-    if(aImpact!==bImpact) return bImpact-aImpact;
-    return 0; // preserve chronological for same tier
-  });
+  // Keep chronological order — key plays tell a story
   return uniq.slice(0,25);
 }
 
@@ -977,7 +980,7 @@ function computeExcFromWP(g,d,wpStats){
       total,
       scores:{
         leverage:{score:0,max:35,name:"Leverage",desc:"How much win probability moved",detail:"Insufficient play-by-play"},
-        swings:{score:0,max:15,name:"Swings",desc:"How often the game flipped",detail:"Insufficient play-by-play"},
+        swings:{score:0,max:15,name:"Momentum",desc:"How often the game flipped",detail:"Insufficient play-by-play"},
         clutch:{score:0,max:15,name:"Clutch Time",desc:"Late leverage and high-stakes moments",detail:"Insufficient play-by-play"},
         control:{score:0,max:10,name:"In Doubt",desc:"How long the outcome stayed uncertain",detail:"Insufficient play-by-play"},
         chaos:{score:0,max:10,name:"Chaos",desc:"Turnovers/special teams that actually swung WP",detail:"Insufficient play-by-play"},
@@ -1013,8 +1016,8 @@ function computeExcFromWP(g,d,wpStats){
   const swings = {
     score: scoreFrom01(swing01, 15),
     max:15,
-    name:"Swings",
-    desc:"How often the game crossed the midline and swung between advantage states",
+    name:"Momentum",
+    desc:"How often the likely winner changed and the game swung between advantage states",
     detail:`50% crossings=${wpStats.crosses50}, 40/60 crossings=${wpStats.crosses4060}`
   };
   const clutch = {
@@ -1065,8 +1068,19 @@ function titleizePlay(t){
   t=normSpace(t);
   if(!t) return t;
   t=t.replace(/\(.*?shotgun.*?\)/ig,"").replace(/\s+/g," ").trim();
+  // Strip extra point / PAT info and everything after it
+  const patIdx=t.toLowerCase().indexOf("extra point");
+  if(patIdx>0) t=t.slice(0,patIdx).trim();
+  // Strip kicker parenthetical
+  t=t.replace(/\s*\([^)]*\bKick\b[^)]*\)\s*$/i,"").trim();
+  // Strip bare kicker after TOUCHDOWN
+  t=t.replace(/\b(TOUCHDOWN)\s*[.,]?\s+[A-Z][a-z]?\.\s*[A-Z][A-Za-z'-]+.*/i, "$1").trim();
   t=t.replace(/\bTD\b/g,"touchdown");
   t=t.replace(/TOUCHDOWN/ig,"touchdown");
+  // Strip trailing kicker after "touchdown"
+  t=t.replace(/(touchdown)\s+[A-Z][a-z]?\.\s*[A-Z][A-Za-z'-]+.*/i,"$1").trim();
+  // Strip Center-/Holder- info
+  t=t.replace(/,?\s*Center-\S+.*/i,"").trim();
   return t;
 }
 function classifyArchetype(wpSeries){
@@ -1181,7 +1195,17 @@ function extractScoringPlays(d){
     const result=(dr.displayResult||dr.result||"").toLowerCase();
     if(result.includes("touchdown")||result.includes("field goal")){
       const plays=dr.plays||[];
-      const last=plays[plays.length-1];
+      // For TDs, find the actual TD play, not the extra point that follows
+      let scoringPlay=null;
+      if(result.includes("touchdown")){
+        scoringPlay=plays.find(p=>{
+          const t=(p.text||p.shortText||"").toLowerCase();
+          const ty=(p.type?.text||"").toLowerCase();
+          return t.includes("touchdown")||ty.includes("touchdown");
+        });
+      }
+      // Fallback to last play for FGs or if TD play not found
+      const last=scoringPlay||plays[plays.length-1];
       if(last){
         scores.push({
           team,
