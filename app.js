@@ -5,6 +5,8 @@ import{TEAMS,tn,TK,espnSB,espnSum,parseEv,computeExc,oGrade,gradeFor,extractKP,b
 const cc=c=>({s:"cs",a:"ca",b:"cb",c:"cc",d:"cd",f:"cf"}[c]||"");
 const bc=c=>({s:"bs",a:"ba",b:"bbl",c:"bc",d:"bd",f:"bf2"}[c]||"");
 const normTeam=(x)=>x==="LAR"?"LA":x;
+// Short team name: just the mascot (last word of full name), e.g. "KC" → "Chiefs"
+const shortName=(abbr)=>{const full=TEAMS[abbr];if(!full)return abbr;const parts=full.split(" ");return parts[parts.length-1];};
 const _ns=s=>(s||"").toString().replace(/\s+/g," ").trim();
 
 // ── Clean ESPN play text into readable English ──
@@ -38,8 +40,9 @@ function _humanizePlay(raw){
   // Remove kicker XP parenthetical like "(Harrison Butker Kick)" or "(kick is good)"
   s=s.replace(/\s*\([^)]*\bKick\b[^)]*\)\s*$/i,"").trim();
   s=s.replace(/\s*\(\s*kick\s+is\s+(?:good|no\s+good)\s*\)\s*$/i,"").trim();
-  // Remove bare kicker name after TD: "...TOUCHDOWN H.Butker kick" or "...for a touchdown Butker"
-  s=s.replace(/\b(TOUCHDOWN|touchdown)\s+[A-Z][a-z]?\.\s*[A-Z][A-Za-z'-]+\s*(?:kick|Kick)?.*/i, "$1").trim();
+  // Remove bare kicker name/info after TOUCHDOWN before it gets converted
+  // Catches: "TOUCHDOWN H.Butker kick", "TOUCHDOWN Butker", "TOUCHDOWN. H.Butker extra point"
+  s=s.replace(/\b(TOUCHDOWN)\s*[.,]?\s+[A-Z][a-z]?\.\s*[A-Z][A-Za-z'-]+.*/i, "$1").trim();
   // Remove trailing "Center-..." or "Holder-..." (snapper/holder info)
   s=s.replace(/,?\s*Center-\S+.*/i,"").trim();
   s=s.replace(/,?\s*Holder-\S+.*/i,"").trim();
@@ -63,8 +66,9 @@ function _humanizePlay(raw){
   s=s.replace(/to [A-Z]{2,4}\s+(\d+)/g, "to the $1");
   // ", TOUCHDOWN" → " for a touchdown"
   s=s.replace(/,?\s*TOUCHDOWN/gi, " for a touchdown");
-  // Strip trailing kicker/holder after "for a touchdown" — catches "for a touchdown Butker" leftover
-  s=s.replace(/(for a touchdown)\s+[A-Z][A-Za-z'-]+\s*$/i, "$1");
+  // Strip trailing kicker/holder after "for a touchdown" — catches "for a touchdown Butker" or "for a touchdown Bass"
+  // Also catches multiple trailing words like "for a touchdown Butker kick is good"
+  s=s.replace(/(for a touchdown)\s+[A-Z][A-Za-z'-]+.*/i, "$1");
   // "for no gain"
   s=s.replace(/for no gain/g,"for no gain");
   // Remove "No Play" completely
@@ -110,10 +114,8 @@ function buildRecap(sum){
   const deficit=sum.maxWinnerDeficit||0;
   const arche=sum.archetype?.type||"tight";
   const hasOT=sum.hasOT;
-  const enriched=(sum.enrichedPlays||[]).map(p=>({...p,text:_humanizePlay(p.text)})).filter(p=>p.text);
   const leaders=sum.leaders||[];
   const qNarr=sum.quarterNarrative||[];
-  const wp=sum.wpStats||{};
   const notable=sum.notablePlays||[];
   const scoring=sum.scoringPlays||[];
   const pRound=sum.playoffRound||"";
@@ -131,8 +133,35 @@ function buildRecap(sum){
     if(pct>=.65&&l.td>=1)return"efficient";if(ints>=2&&l.td<=1)return"mistake-prone";
     if(pct<.50||ypa<5)return"poor";return"ok";
   }
-  const _perStr=p=>p<=4?`Q${p}`:"overtime";
-  const _inThe=p=>p<=4?`the ${_perStr(p)}`:"overtime";
+  // Proper capitalization for player names
+  function _capName(n){
+    if(!n)return"";
+    return n.split(/\s+/).map(w=>{
+      if(w.length<=1)return w.toUpperCase();
+      // Handle hyphenated names like "Smith-Schuster"
+      return w.split("-").map(p=>p.charAt(0).toUpperCase()+p.slice(1).toLowerCase()).join("-");
+    }).join(" ");
+  }
+  // Describe a scoring play with context (score, time, down/distance when noteworthy)
+  function _scoreLine(sp){
+    if(!sp)return"";
+    let txt=_humanizePlay(sp.text);
+    if(!txt)return"";
+    const per=sp.period<=4?`Q${sp.period}`:"OT";
+    const parts=[];
+    if(sp.clock) parts.push(`${sp.clock} ${per}`);
+    if(sp.homeScore!=null&&sp.awayScore!=null){
+      const hLead=sp.homeScore>sp.awayScore;
+      const aLead=sp.awayScore>sp.homeScore;
+      const tied=sp.homeScore===sp.awayScore;
+      const high=Math.max(sp.homeScore,sp.awayScore), low=Math.min(sp.homeScore,sp.awayScore);
+      const leader=hLead?hN:aLead?aN:null;
+      if(tied) parts.push(`tying it ${high}-all`);
+      else if(leader) parts.push(`${leader} ${high}-${low}`);
+    }
+    if(parts.length) txt+=` (${parts.join(", ")})`;
+    return txt;
+  }
 
   // ── Performers across both teams ──
   const wAll=leaders.filter(l=>l.team===wAb).sort((a,b)=>(b.td*80+b.yds)-(a.td*80+a.yds));
@@ -140,8 +169,6 @@ function buildRecap(sum){
   const winQB=leaders.find(l=>l.team===wAb&&l.type==="passing");
   const loseQB=leaders.find(l=>l.team===lAb&&l.type==="passing");
   const wQBq=_pq(winQB), lQBq=_pq(loseQB);
-
-  // Non-QB standouts: rushers/receivers with big stat lines
   const wSkill=wAll.filter(l=>l.type!=="passing");
   const lSkill=lAll.filter(l=>l.type!=="passing");
   const wStarRB=wSkill.find(l=>l.type==="rushing"&&(l.yds>=80||l.td>=2));
@@ -150,29 +177,27 @@ function buildRecap(sum){
   const lStarWR=lSkill.find(l=>l.type==="receiving"&&(l.yds>=80||l.td>=2));
 
   const turnovers=notable.filter(p=>p.type==="INT"||p.type==="FUM");
-  const totalTOs=turnovers.length;
 
-  // ── P1: LEDE — archetype-aware but woven with performer color ──
+  // ── P1: LEDE — archetype-aware opening ──
   let lede="";
   let ctxPre="";
   if(pRound==="Super Bowl") ctxPre="In the Super Bowl, ";
   else if(pRound==="Conference Championship") ctxPre="In the conference championship, ";
   else if(pRound) ctxPre=`In the ${pRound}, `;
 
-  // Build a performer clause to weave into the lede
   let ledeStar="";
-  if(wStarRB&&wStarRB.yds>=120) ledeStar=` behind ${wStarRB.name}'s ${wStarRB.yds}-yard, ${wStarRB.td}-TD rushing performance`;
-  else if(wStarWR&&wStarWR.yds>=120) ledeStar=` fueled by ${wStarWR.name}'s ${wStarWR.yds}-yard receiving day`;
-  else if(winQB&&wQBq==="dominant") ledeStar=` behind ${winQB.name}'s ${winQB.td}-TD performance`;
+  if(wStarRB&&wStarRB.yds>=120) ledeStar=` behind ${_capName(wStarRB.name)}'s ${wStarRB.yds}-yard, ${wStarRB.td}-TD rushing performance`;
+  else if(wStarWR&&wStarWR.yds>=120) ledeStar=` fueled by ${_capName(wStarWR.name)}'s ${wStarWR.yds}-yard receiving day`;
+  else if(winQB&&wQBq==="dominant") ledeStar=` behind ${_capName(winQB.name)}'s ${winQB.td}-TD performance`;
 
   if(arche==="comeback"&&deficit>=14){
     lede=`${ctxPre}${W} erased a ${deficit}-point deficit${ledeStar} to win ${scoreStr}${hasOT?" in overtime":""}. `;
   } else if(arche==="comeback"){
     lede=`${ctxPre}${W} trailed for most of this game before surging late${ledeStar} for a ${scoreStr} win${hasOT?" in overtime":""}. `;
   } else if(arche==="seesaw"){
-    lede=`${ctxPre}Neither team could pull away in this one. The lead changed hands ${wp.crosses50||"multiple"} times before ${W} emerged${ledeStar}, ${scoreStr}${hasOT?" in overtime":""}.`;
+    lede=`${ctxPre}Neither team could pull away in a wild back-and-forth battle. ${W} emerged${ledeStar}, ${scoreStr}${hasOT?" in overtime":""}.`;
   } else if(arche==="wire"&&margin>=17){
-    lede=`${ctxPre}${W} ran away with this one${ledeStar}, routing ${L} ${scoreStr}.`;
+    lede=`${ctxPre}${W} dominated from the opening whistle${ledeStar}, routing ${L} ${scoreStr}.`;
   } else if(arche==="wire"&&margin>=10){
     lede=`${ctxPre}${W} controlled this game from start to finish${ledeStar}, winning ${scoreStr}. ${L} never seriously threatened.`;
   } else if(arche==="wire"){
@@ -192,125 +217,211 @@ function buildRecap(sum){
   }
   paragraphs.push(lede);
 
-  // ── P2: NARRATIVE — how the game unfolded, with plays and performers woven in ──
-  let narr="";
+  // ── P2: GAME FLOW — chronological narrative using scoring plays and key moments ──
+  // Build a timeline of all significant events, then narrate through them
+  const timeline=[];
+  for(const sp of scoring){
+    const txt=_humanizePlay(sp.text);
+    if(!txt)continue;
+    timeline.push({period:sp.period,clock:sp.clock,type:sp.type,team:sp.team,
+      text:txt,homeScore:sp.homeScore,awayScore:sp.awayScore,source:"score"});
+  }
+  // Add key turnovers to timeline
+  for(const np of notable){
+    if(np.type==="INT"||np.type==="FUM"){
+      const txt=_humanizePlay(np.text);
+      if(!txt)continue;
+      timeline.push({period:np.period,clock:np.clock,type:np.type,team:np.team,
+        text:txt,source:"turnover"});
+    }
+  }
+  // Sort by game time (period asc, then clock desc within period)
+  timeline.sort((a,b)=>{
+    if(a.period!==b.period)return a.period-b.period;
+    const ca=parseClockStr(a.clock), cb=parseClockStr(b.clock);
+    if(ca!=null&&cb!=null)return cb-ca; // higher clock = earlier in quarter
+    return 0;
+  });
+
+  function parseClockStr(c){
+    if(!c)return null;
+    const m=String(c).match(/(\d+):(\d+)/);
+    return m?(+m[1]*60+ +m[2]):null;
+  }
+
+  // Build the narrative per quarter/half with multiple scoring plays mentioned
   const qH=qNarr.find(q=>q.q===2)||qNarr[1];
+  const q1=qNarr.find(q=>q.q===1);
   const q3=qNarr.find(q=>q.q===3);
   const q4=qNarr.find(q=>q.q===4);
   const halftimeLead=qH?(qH.endHS-qH.endAS):0;
+
+  let narr="";
+  // First half
+  const firstHalfScores=timeline.filter(t=>t.period<=2&&t.source==="score");
+  const firstHalfTOs=timeline.filter(t=>t.period<=2&&t.source==="turnover");
   const hLeader=halftimeLead>0?hN:halftimeLead<0?aN:null;
   const hHigh=qH?Math.max(qH.endHS,qH.endAS):0;
   const hLow=qH?Math.min(qH.endHS,qH.endAS):0;
-  const q3Lead=q3?(q3.endHS-q3.endAS):halftimeLead;
-  const q4Lead=q4?(q4.endHS-q4.endAS):q3Lead;
-  const leaderFlippedQ3=(halftimeLead>0&&q3Lead<0)||(halftimeLead<0&&q3Lead>0);
 
-  // Find the most impactful play in each half
-  const firstHalfPlays=enriched.filter(p=>p.period<=2);
-  const secondHalfPlays=enriched.filter(p=>p.period>=3);
-  const topFirstHalf=firstHalfPlays[0];
-  const topSecondHalf=secondHalfPlays[0];
-
-  // Build first half sentence — incorporate a play if there was one
-  if(qH){
+  if(firstHalfScores.length===0&&qH){
+    // Scoreless or limited first half
+    if(hHigh===0) narr+="Neither team found the end zone in the first half. ";
+    else narr+=`It was ${hHigh}-${hLow} at the break. `;
+  } else if(firstHalfScores.length<=2&&qH){
+    // Sparse scoring — mention the plays that did happen
     if(hLeader&&Math.abs(halftimeLead)>=10){
-      narr+=`${hLeader} jumped out to a ${hHigh}-${hLow} lead by halftime`;
-      if(topFirstHalf&&topFirstHalf.text) narr+=`, highlighted by ${topFirstHalf.text}`;
+      narr+=`${hLeader} took control early, building a ${hHigh}-${hLow} lead by halftime`;
+      if(firstHalfScores.length>0){
+        const topPlay=firstHalfScores[firstHalfScores.length-1];
+        narr+=`, capped by ${_scoreLine(topPlay)}`;
+      }
       narr+=`. `;
+    } else if(qH){
+      if(hLeader) narr+=`${hLeader} carried a ${hHigh}-${hLow} lead into halftime. `;
+      else if(hHigh>0) narr+=`It was ${hHigh}-all at the break. `;
+    }
+  } else if(firstHalfScores.length>=3&&qH){
+    // Active first half — describe the flow
+    if(hLeader&&Math.abs(halftimeLead)>=14){
+      narr+=`${hLeader} jumped out to a ${hHigh}-${hLow} halftime lead. `;
+      // Mention a standout first-half play
+      const topFH=firstHalfScores.find(s=>s.type==="TD");
+      if(topFH) narr+=`The highlight was ${_scoreLine(topFH)}. `;
     } else if(hLeader&&Math.abs(halftimeLead)>=4){
-      narr+=`It was ${hHigh}-${hLow} ${hLeader} at halftime`;
-      if(topFirstHalf&&topFirstHalf.swingPct>=10) narr+=` after ${topFirstHalf.text}`;
+      narr+=`The teams traded blows early. ${hLeader} took a ${hHigh}-${hLow} lead into the break`;
+      if(firstHalfTOs.length>0) narr+=` as ${firstHalfTOs.length} turnover${firstHalfTOs.length>1?"s":""} kept things volatile`;
       narr+=`. `;
-    } else if(hLeader){
-      narr+=`${hLeader} took a slim ${hHigh}-${hLow} lead into halftime. `;
-    } else if(hHigh>0){
-      narr+=`Tied ${hHigh}-all at the break. `;
+    } else {
+      if(hHigh>0&&hLeader) narr+=`After a back-and-forth first half it was ${hHigh}-${hLow} ${hLeader} at the break. `;
+      else if(hHigh>0) narr+=`After a competitive first half it was tied ${hHigh}-all at the break. `;
     }
   }
 
-  // Build second half sentence — this is where the story usually is
-  if(q3&&leaderFlippedQ3){
+  // Second half — this is where the story usually lives
+  const secondHalfScores=timeline.filter(t=>t.period>=3&&t.period<=4&&t.source==="score");
+  const q3Lead=q3?(q3.endHS-q3.endAS):halftimeLead;
+  const leaderFlippedQ3=(halftimeLead>0&&q3Lead<0)||(halftimeLead<0&&q3Lead>0);
+
+  if(leaderFlippedQ3&&q3){
     const q3Winner=q3Lead>0?hN:aN;
     const q3High=Math.max(q3.endHS,q3.endAS), q3Low=Math.min(q3.endHS,q3.endAS);
-    narr+=`${q3Winner} seized control in the third quarter, taking a ${q3High}-${q3Low} lead. `;
-  } else if(q3&&q3.bigSwing){
-    const bs=q3.bigSwing;
-    const bsText=_humanizePlay(bs.text);
-    if(bsText&&Math.abs(bs.delta||0)>=0.08) narr+=`The third quarter swung on ${bsText}. `;
-  }
-
-  // Fourth quarter drama
-  if(topSecondHalf&&topSecondHalf.period>=4&&topSecondHalf.swingPct>=10){
-    const per=topSecondHalf.period>4?"overtime":"the fourth quarter";
-    narr+=`The pivotal play came in ${per}${topSecondHalf.clock?` with ${topSecondHalf.clock} left`:""}: ${topSecondHalf.text}`;
-    if(topSecondHalf.swingPct>=20) narr+=` — a ${topSecondHalf.swingPct}-point WP swing`;
-    narr+=`. `;
-  } else if(topSecondHalf&&topSecondHalf.text){
-    narr+=`The second half's biggest moment: ${topSecondHalf.text}. `;
-  }
-
-  // Turnovers — only mention if they mattered
-  if(totalTOs>=3){
-    const ints=turnovers.filter(t=>t.type==="INT").length;
-    const fums=turnovers.filter(t=>t.type==="FUM").length;
-    let toStr=`${totalTOs} turnovers`;
-    if(ints>0&&fums>0) toStr+=` (${ints} interception${ints>1?"s":""}, ${fums} fumble${fums>1?"s":""})`;
-    narr+=`${toStr} kept the game chaotic. `;
-  } else if(totalTOs>=1){
-    const lateTOs=turnovers.filter(t=>t.period>=3);
-    if(lateTOs.length>=1){
-      const lto=lateTOs[0];
-      narr+=`A ${lto.type==="INT"?"interception":"fumble"} in ${_inThe(lto.period)} proved costly. `;
+    narr+=`${q3Winner} stormed back in the third quarter to take a ${q3High}-${q3Low} lead. `;
+  } else if(q3&&secondHalfScores.length>0){
+    // Mention key third-quarter scoring
+    const q3Scores=secondHalfScores.filter(s=>s.period===3);
+    if(q3Scores.length>=2){
+      narr+=`The third quarter saw ${q3Scores.length} scoring drives. `;
+    } else if(q3Scores.length===1){
+      const s=q3Scores[0];
+      const teamName=tn(s.team);
+      narr+=`${teamName} scored in the third quarter with ${_scoreLine(s)}. `;
     }
   }
 
   if(narr.trim()) paragraphs.push(narr.trim());
 
-  // ── P3: PERFORMERS — everyone who matters, not just QBs ──
+  // ── P3: FOURTH QUARTER + OT — detailed coverage of late-game drama ──
+  let lateNarr="";
+  const q4Scores=timeline.filter(t=>t.period===4&&t.source==="score");
+  const q4TOs=timeline.filter(t=>t.period===4&&t.source==="turnover");
+  const otScores=timeline.filter(t=>t.period>4&&t.source==="score");
+  const lateScores=[...q4Scores,...otScores];
+
+  // Determine the game state entering Q4
+  const q4Start=q4?(q4.startHS-q4.startAS):q3Lead;
+  const q4Leader=q4Start>0?hN:q4Start<0?aN:null;
+  const q4StartHigh=q4?Math.max(q4.startHS,q4.startAS):0;
+  const q4StartLow=q4?Math.min(q4.startHS,q4.startAS):0;
+
+  if(lateScores.length>=3||(lateScores.length>=2&&hasOT)){
+    // Dramatic late game — describe play-by-play
+    if(q4Leader&&Math.abs(q4Start)<=7) lateNarr+=`Entering the fourth quarter with ${q4Leader} up ${q4StartHigh}-${q4StartLow}, `;
+    else if(q4Leader&&Math.abs(q4Start)>7) lateNarr+=`With ${q4Leader} ahead ${q4StartHigh}-${q4StartLow} entering the fourth, `;
+    else if(!q4Leader&&q4StartHigh>0) lateNarr+=`With the game knotted ${q4StartHigh}-all entering the fourth, `;
+    else lateNarr+=`In the fourth quarter, `;
+
+    // Describe each late scoring play
+    const latePlays=lateScores.slice(0,5); // cap at 5 for readability
+    const playDescs=latePlays.map(s=>{
+      const teamName=tn(s.team);
+      const line=_scoreLine(s);
+      return `${teamName}: ${line}`;
+    });
+    lateNarr+=`the scoring came fast. ${playDescs.join(". ")}. `;
+
+    if(hasOT&&otScores.length>0){
+      lateNarr+=`In overtime, ${W} finished it off`;
+      const otWinner=otScores.find(s=>tn(s.team)===W);
+      if(otWinner){
+        const otLine=_scoreLine(otWinner);
+        lateNarr+=` with ${otLine}`;
+      }
+      lateNarr+=`. `;
+    } else if(hasOT){
+      lateNarr+=`The game went to overtime where ${W} prevailed. `;
+    }
+  } else if(lateScores.length>=1){
+    // Some late scoring
+    if(q4Scores.length>0){
+      const bigQ4=q4Scores[q4Scores.length-1]; // last Q4 score is often decisive
+      const teamName=tn(bigQ4.team);
+      if(q4Leader&&Math.abs(q4Start)<=3){
+        lateNarr+=`The fourth quarter came down to the wire. ${teamName} scored with ${_scoreLine(bigQ4)}. `;
+      } else {
+        lateNarr+=`In the fourth quarter, ${teamName} scored with ${_scoreLine(bigQ4)}. `;
+      }
+    }
+    if(hasOT) lateNarr+=`After regulation ended tied, ${W} won it in overtime. `;
+  } else if(arche==="wire"&&margin>=14){
+    // Blowout — no late scoring needed
+    lateNarr+=`The fourth quarter was garbage time as ${W} cruised to the finish. `;
+  } else if(q4TOs.length>0){
+    // Turnovers were the story of Q4
+    lateNarr+=`The fourth quarter was shaped by ${q4TOs.length} turnover${q4TOs.length>1?"s":""} as both teams tried to close it out. `;
+  }
+
+  if(lateNarr.trim()) paragraphs.push(lateNarr.trim());
+
+  // ── P4: PERFORMERS — key stat lines ──
   const perfParts=[];
-
-  // Winner's side — lead with whoever actually drove the offense
   const wStarNonQB=wStarRB||wStarWR;
-  if(wStarNonQB&&(!ledeStar||!ledeStar.includes(wStarNonQB.name))){
-    // Didn't already mention in lede
-    if(wStarNonQB.type==="rushing") perfParts.push(`${wStarNonQB.name} carried ${W}'s ground game (${wStarNonQB.line})`);
-    else perfParts.push(`${wStarNonQB.name} was a force in the passing game for ${W} (${wStarNonQB.line})`);
+  if(wStarNonQB&&(!ledeStar||!ledeStar.includes(_capName(wStarNonQB.name)))){
+    if(wStarNonQB.type==="rushing") perfParts.push(`${_capName(wStarNonQB.name)} carried ${W}'s ground game (${wStarNonQB.line})`);
+    else perfParts.push(`${_capName(wStarNonQB.name)} was a force in the passing game for ${W} (${wStarNonQB.line})`);
   }
-  // Second skill player on winner's side
   const wStar2=wSkill.find(l=>l!==wStarNonQB&&(l.yds>=70||l.td>=1));
-  if(wStar2) perfParts.push(`${wStar2.name} added ${wStar2.line}`);
+  if(wStar2) perfParts.push(`${_capName(wStar2.name)} added ${wStar2.line}`);
 
-  if(winQB&&!ledeStar.includes(winQB.name||"__none__")){
-    if(wQBq==="dominant") perfParts.push(`${winQB.name} was outstanding (${winQB.line})`);
-    else if(wQBq==="sharp") perfParts.push(`${winQB.name} was sharp (${winQB.line})`);
-    else if(wQBq==="mistake-prone") perfParts.push(`${winQB.name} was erratic (${winQB.line}) but the team overcame it`);
-    else if(wQBq!=="poor") perfParts.push(`${winQB.name} went ${winQB.line}`);
+  if(winQB&&!ledeStar.includes(_capName(winQB.name)||"__none__")){
+    if(wQBq==="dominant") perfParts.push(`${_capName(winQB.name)} was outstanding (${winQB.line})`);
+    else if(wQBq==="sharp") perfParts.push(`${_capName(winQB.name)} was sharp (${winQB.line})`);
+    else if(wQBq==="mistake-prone") perfParts.push(`${_capName(winQB.name)} was erratic (${winQB.line}) but the team overcame it`);
+    else if(wQBq!=="poor") perfParts.push(`${_capName(winQB.name)} went ${winQB.line}`);
   }
 
-  // Loser's side — highlight effort or failure
   const lStarNonQB=lStarRB||lStarWR;
   if(loseQB){
     if(lQBq==="dominant"||lQBq==="sharp"){
-      perfParts.push(`${loseQB.name} played well in defeat for ${L} (${loseQB.line})`);
-      if(lStarNonQB) perfParts.push(`${lStarNonQB.name} also produced (${lStarNonQB.line})`);
+      perfParts.push(`${_capName(loseQB.name)} played well in defeat for ${L} (${loseQB.line})`);
+      if(lStarNonQB) perfParts.push(`${_capName(lStarNonQB.name)} also produced (${lStarNonQB.line})`);
     } else if(lQBq==="mistake-prone"){
       const intM=(loseQB.line||"").match(/(\d+)\s*INT/);
       const ints=intM?+intM[1]:0;
-      perfParts.push(`${loseQB.name} hurt ${L} with ${ints} interception${ints>1?"s":""} (${loseQB.line})`);
+      perfParts.push(`${_capName(loseQB.name)} hurt ${L} with ${ints} interception${ints>1?"s":""} (${loseQB.line})`);
     } else if(lQBq==="poor"){
-      perfParts.push(`${loseQB.name} struggled for ${L} (${loseQB.line})`);
-      if(lStarNonQB&&lStarNonQB.yds>=100) perfParts.push(`${lStarNonQB.name} did what he could (${lStarNonQB.line})`);
+      perfParts.push(`${_capName(loseQB.name)} struggled for ${L} (${loseQB.line})`);
+      if(lStarNonQB&&lStarNonQB.yds>=100) perfParts.push(`${_capName(lStarNonQB.name)} did what he could (${lStarNonQB.line})`);
     }
   } else if(lStarNonQB){
-    perfParts.push(`${lStarNonQB.name} led ${L}'s effort (${lStarNonQB.line})`);
+    perfParts.push(`${_capName(lStarNonQB.name)} led ${L}'s effort (${lStarNonQB.line})`);
   }
 
   if(perfParts.length>0){
-    // Join as flowing text with periods, not a list
     paragraphs.push(perfParts.map((p,i)=>i===0?p:p.charAt(0).toLowerCase()+p.slice(1)).join(". ")+".");
   }
 
-  // ── P4: CLOSER — context and rating ──
+  // ── P5: CLOSER — context and rating ──
   let closer="";
   if(pRound==="Super Bowl"){
     if(sum.excitementScore>=80) closer="The biggest stage delivered a game worthy of it.";
@@ -326,7 +437,7 @@ function buildRecap(sum){
   closer+=`Excitement Index: ${sum.excitementScore||0} (${sum.excitementVerdict||"N/A"}).`;
   paragraphs.push(closer);
 
-  return paragraphs.filter(p=>p&&p.trim()).slice(0,4);
+  return paragraphs.filter(p=>p&&p.trim()).slice(0,6);
 }
 
 
@@ -334,7 +445,8 @@ function buildRecap(sum){
 
 function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChange, exc, topLev, homeTeam, awayTeam}){
   const [tooltip,setTooltip]=useState(null);
-  const [vLine,setVLine]=useState(null); // {x, wp, tMin, homeScore, awayScore}
+  const [vLine,setVLine]=useState(null);
+  const [zoom,setZoom]=useState("Full"); // "Full","Q1","Q2","Q3","Q4","Clutch"
 
   const activeSeries = (modelSel==="Alt") ? (seriesAlt||[]) : (seriesE||[]);
   const bothSeries = (modelSel==="Both");
@@ -346,28 +458,30 @@ function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChang
   const allForExtent = bothSeries ? [...(seriesE||[]), ...(seriesAlt||[])] : activeSeries;
   const maxTMin=Math.max(...allForExtent.filter(s=>s.tMin!=null).map(s=>s.tMin));
   const hasOT=maxTMin>60;
-  // For OT games, give OT a proportionally larger share of the chart
-  // Regulation (60 min) gets 78% of width, OT gets 22%
   const otMaxMin=hasOT?Math.ceil(maxTMin/5)*5:60;
-  const regFrac=hasOT?0.78:1.0;
+
+  // Auto-zoom on Clutch
+  const effectiveZoom=(mode==="Clutch")?"Clutch":zoom;
+
+  // Zoom ranges (in game-minutes)
+  const zoomRanges={Full:[0,otMaxMin],Q1:[0,15],Q2:[15,30],Q3:[30,45],Q4:[45,60],Clutch:[52,otMaxMin]};
+  const [zoomStart,zoomEnd]=zoomRanges[effectiveZoom]||[0,otMaxMin];
 
   const W=860,H=200,pad=28;
   const chartW=W-2*pad;
-  const toX=t=>{
-    if(!hasOT||t<=60) return pad+(t/60)*chartW*(hasOT?regFrac:1);
-    // OT portion: map 60..otMaxMin to the remaining 22%
-    const otFrac=(t-60)/(otMaxMin-60);
-    return pad+chartW*regFrac+otFrac*chartW*(1-regFrac);
-  };
+  // Simple linear mapping from zoomStart..zoomEnd to chart area
+  const toX=t=>pad+((t-zoomStart)/(zoomEnd-zoomStart))*chartW;
   const toY=wp=>pad+(1-wp)*(H-2*pad);
 
+  // Filter series to zoom range
+  const inRange=s=>s&&s.tMin!=null&&s.wp!=null&&s.tMin>=zoomStart&&s.tMin<=zoomEnd;
   const step=Math.max(1,Math.floor(activeSeries.length/500));
   const pts=[];
   for(let i=0;i<activeSeries.length;i+=step){
     const s=activeSeries[i];
-    if(s&&s.tMin!=null&&s.wp!=null)pts.push([toX(s.tMin),toY(s.wp)]);
+    if(inRange(s))pts.push([toX(s.tMin),toY(s.wp)]);
   }
-  const path="M "+pts.map(p=>p[0].toFixed(2)+" "+p[1].toFixed(2)).join(" L ");
+  const path=pts.length>1?"M "+pts.map(p=>p[0].toFixed(2)+" "+p[1].toFixed(2)).join(" L "):"";
 
   let pathAlt=null;
   if(bothSeries && seriesAlt && seriesAlt.length>1){
@@ -375,24 +489,26 @@ function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChang
     const pts2=[];
     for(let i=0;i<seriesAlt.length;i+=step2){
       const s=seriesAlt[i];
-      if(s&&s.tMin!=null&&s.wp!=null)pts2.push([toX(s.tMin),toY(s.wp)]);
+      if(inRange(s))pts2.push([toX(s.tMin),toY(s.wp)]);
     }
     if(pts2.length>1) pathAlt="M "+pts2.map(p=>p[0].toFixed(2)+" "+p[1].toFixed(2)).join(" L ");
   }
 
-  // Quarter dividers and labels
+  // Quarter dividers and labels (only for visible range)
   const qDividers=[];
   const qLabels=[];
-  for(let q=1;q<=4;q++){
-    const start=(q-1)*15, end=q*15;
-    const mid=(start+end)/2;
-    qLabels.push({x:toX(mid),label:`Q${q}`});
-    if(q<4) qDividers.push(toX(end));
-  }
-  if(hasOT){
-    qDividers.push(toX(60)); // regulation end
-    const otMid=(60+otMaxMin)/2;
-    qLabels.push({x:toX(otMid),label:"OT"});
+  const quarters=[{q:1,s:0,e:15},{q:2,s:15,e:30},{q:3,s:30,e:45},{q:4,s:45,e:60}];
+  if(hasOT) quarters.push({q:5,s:60,e:otMaxMin});
+  for(const qr of quarters){
+    // Show label if quarter overlaps the zoom range at all
+    const overlapStart=Math.max(qr.s,zoomStart), overlapEnd=Math.min(qr.e,zoomEnd);
+    if(overlapEnd>overlapStart){
+      const mid=(overlapStart+overlapEnd)/2;
+      qLabels.push({x:toX(mid),label:qr.q<=4?`Q${qr.q}`:"OT",isOT:qr.q>4});
+    }
+    // Divider at end of quarter if it's within range
+    if(qr.e>zoomStart&&qr.e<zoomEnd&&qr.q<5) qDividers.push(toX(qr.e));
+    if(qr.q===4&&hasOT&&60>zoomStart&&60<zoomEnd) qDividers.push(toX(60));
   }
 
   const overlays=[];
@@ -405,12 +521,12 @@ function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChang
 
   if(mode==="Leverage"){
     (topLev||[]).slice(0,6).forEach(tp=>{
-      if(tp.tMin==null)return;
+      if(tp.tMin==null||tp.tMin<zoomStart||tp.tMin>zoomEnd)return;
       const per=tp.period<=4?`Q${tp.period}`:"OT";
       addDot(toX(tp.tMin),toY(tp.wp||0.5),6,"var(--gold)","rgba(201,162,39,.4)",{
         label:`${per} ${tp.clock}`,
         detail:_humanizePlay(tp.text)||"High leverage play",
-        sub:`WP swing: ${Math.round(Math.abs(tp.delta||tp.absDelta||0)*100)}% | Score: ${tn(homeTeam)} ${tp.homeScore}, ${tn(awayTeam)} ${tp.awayScore}`,
+        sub:`WP swing: ${Math.round(Math.abs(tp.delta||tp.absDelta||0)*100)}% | Score: ${shortName(homeTeam)} ${tp.homeScore}, ${shortName(awayTeam)} ${tp.awayScore}`,
         wp:tp.wp, tMin:tp.tMin, homeScore:tp.homeScore, awayScore:tp.awayScore
       });
     });
@@ -419,31 +535,30 @@ function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChang
     for(let i=1;i<activeSeries.length;i++){
       const s=activeSeries[i];
       const prev=activeSeries[i-1];
-      if(s.wp==null||prev.wp==null)continue;
+      if(s.wp==null||prev.wp==null||s.tMin<zoomStart||s.tMin>zoomEnd)continue;
       const swing=Math.abs(s.wp-prev.wp);
       const crossed50=(prev.wp<0.5&&s.wp>=0.5)||(prev.wp>=0.5&&s.wp<0.5);
-      // Only show if: a meaningful crossing (>5% swing at 50%) or a large swing anywhere (>12%)
       if((crossed50&&swing>=0.05)||swing>=0.12){
         const per=s.period<=4?`Q${s.period}`:"OT";
         const swingPct=Math.round(swing*100);
-        const lbl=crossed50?"Lead change":"Momentum shift";
+        const lbl=crossed50?"Likely winner change":"Momentum shift";
         addDot(toX(s.tMin),toY(s.wp),crossed50?6:5,"var(--blue)","rgba(61,142,212,.4)",{
           label:`${per} ${s.clock} — ${lbl}`,
           detail:_humanizePlay(s.text)||lbl,
-          sub:`WP swing: ${swingPct}% | ${tn(homeTeam)} ${s.homeScore}, ${tn(awayTeam)} ${s.awayScore}`,
+          sub:`WP swing: ${swingPct}% | ${shortName(homeTeam)} ${s.homeScore}, ${shortName(awayTeam)} ${s.awayScore}`,
           wp:s.wp, tMin:s.tMin, homeScore:s.homeScore, awayScore:s.awayScore
         });
       }
     }
   }else if(mode==="Chaos"){
     for(const s of activeSeries){
-      if(s.tag==="TO"||s.tag==="SP"){
+      if((s.tag==="TO"||s.tag==="SP")&&s.tMin>=zoomStart&&s.tMin<=zoomEnd){
         const per=s.period<=4?`Q${s.period}`:"OT";
         const lbl=s.tag==="TO"?"Turnover":"Special teams";
         addDot(toX(s.tMin),toY(s.wp),5.5,"var(--red)","rgba(212,64,64,.4)",{
           label:`${per} ${s.clock} — ${lbl}`,
           detail:_humanizePlay(s.text)||lbl,
-          sub:`WP swing: ${Math.round(s.absDelta*100)}% | Score: ${tn(homeTeam)} ${s.homeScore}, ${tn(awayTeam)} ${s.awayScore}`,
+          sub:`WP swing: ${Math.round(s.absDelta*100)}% | Score: ${shortName(homeTeam)} ${s.homeScore}, ${shortName(awayTeam)} ${s.awayScore}`,
           wp:s.wp, tMin:s.tMin, homeScore:s.homeScore, awayScore:s.awayScore
         });
       }
@@ -474,11 +589,8 @@ function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChang
     }
 
     // Otherwise, find nearest play in time for vertical line
-    // Reverse the piecewise toX mapping to get time from pixel position
-    const cxNorm=(cx-pad)/chartW;
-    let clickTMin;
-    if(!hasOT||cxNorm<=regFrac) clickTMin=(cxNorm/(hasOT?regFrac:1))*60;
-    else clickTMin=60+((cxNorm-regFrac)/(1-regFrac))*(otMaxMin-60);
+    // Reverse the linear toX mapping to get time from pixel position
+    const clickTMin=zoomStart+((cx-pad)/chartW)*(zoomEnd-zoomStart);
     let nearest=null,nearDist=Infinity;
     for(const s of activeSeries){
       if(s.tMin==null)continue;
@@ -491,8 +603,8 @@ function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChang
     }
   }
 
-  const homeName=tn(homeTeam||"Home");
-  const awayName=tn(awayTeam||"Away");
+  const homeName=shortName(homeTeam)||"Home";
+  const awayName=shortName(awayTeam)||"Away";
 
   return h("div",{className:"sec"},
     h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:"1rem",flexWrap:"wrap"}},
@@ -503,10 +615,13 @@ function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChang
           [ ["ESPN","ESPN"], ["nflfastR","Alt"], ["Both","Both"] ].map(o=>h("option",{key:o[0],value:o[1]},o[0]))),
         h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".65rem",letterSpacing:".08em",textTransform:"uppercase",color:"var(--text-3)",marginLeft:".4rem"}},"Overlay"),
         h("select",{value:mode,onChange:e=>{onModeChange(e.target.value);setTooltip(null);setVLine(null);},style:{background:"var(--bg-3)",border:"1px solid var(--border-1)",color:"var(--text-1)",padding:".35rem .5rem",fontFamily:"JetBrains Mono",fontSize:".7rem"}},
-          ["Leverage","Momentum","Chaos","Clutch"].map(o=>h("option",{key:o,value:o},o))))),
+          ["Leverage","Momentum","Chaos","Clutch"].map(o=>h("option",{key:o,value:o},o))),
+        h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".65rem",letterSpacing:".08em",textTransform:"uppercase",color:"var(--text-3)",marginLeft:".4rem"}},"Zoom"),
+        h("select",{value:effectiveZoom,onChange:e=>{setZoom(e.target.value);setTooltip(null);setVLine(null);},disabled:mode==="Clutch",style:{background:"var(--bg-3)",border:"1px solid var(--border-1)",color:mode==="Clutch"?"var(--text-4)":"var(--text-1)",padding:".35rem .5rem",fontFamily:"JetBrains Mono",fontSize:".7rem"}},
+          ["Full","Q1","Q2","Q3","Q4"].concat(hasOT?["Clutch"]:[]).map(o=>h("option",{key:o,value:o},o==="Clutch"?"Clutch (Q4+OT)":o))))),
     h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".6rem",color:"var(--text-4)",marginTop:".3rem",marginBottom:".2rem"}},
       mode==="Leverage"?"Gold dots = highest WP swings. Tap dots for play details, or tap anywhere for score.":
-      mode==="Momentum"?"Blue dots = significant momentum shifts (lead changes + big WP swings). Tap for details.":
+      mode==="Momentum"?"Blue dots = likely winner changes (>50%) and big momentum shifts. Tap for details.":
       mode==="Chaos"?"Red dots = turnovers and special teams plays. Tap for details.":
       "Gold zone = final 8 min of Q4 + OT. Tap anywhere for WP at that point."),
     h("div",{style:{border:"1px solid var(--border-1)",background:"var(--bg-2)",padding:".6rem .6rem .2rem",position:"relative"}},
@@ -516,13 +631,13 @@ function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChang
         h("text",{x:pad-4,y:toY(0.5),fill:"var(--text-4)",fontSize:"9",textAnchor:"end",dominantBaseline:"middle"},"50%"),
         h("text",{x:pad-4,y:toY(0),fill:"var(--text-4)",fontSize:"9",textAnchor:"end",dominantBaseline:"middle"},"0%"),
         // Midline
-        h("line",{x1:toX(0),y1:toY(0.5),x2:toX(otMaxMin),y2:toY(0.5),stroke:"rgba(136,146,164,.35)",strokeWidth:"1",strokeDasharray:"4 4"}),
+        h("line",{x1:toX(zoomStart),y1:toY(0.5),x2:toX(zoomEnd),y2:toY(0.5),stroke:"rgba(136,146,164,.35)",strokeWidth:"1",strokeDasharray:"4 4"}),
         // Quarter dividers
         ...qDividers.map((x,i)=>h("line",{key:`qd-${i}`,x1:x,y1:pad,x2:x,y2:H-pad,stroke:"rgba(136,146,164,.2)",strokeWidth:"1"})),
         // Quarter labels at top
         ...qLabels.map((l,i)=>h("text",{key:`ql-${i}`,x:l.x,y:pad-6,fill:l.label==="OT"?"var(--gold)":"rgba(136,146,164,.5)",fontSize:l.label==="OT"?"10":"9",fontWeight:l.label==="OT"?"600":"400",textAnchor:"middle",fontFamily:"JetBrains Mono"},l.label)),
         // OT background highlight
-        hasOT?h("rect",{x:toX(60),y:pad,width:toX(otMaxMin)-toX(60),height:H-2*pad,fill:"rgba(201,162,39,.06)"}):null,
+        (hasOT&&zoomEnd>60)?h("rect",{x:toX(Math.max(60,zoomStart)),y:pad,width:toX(zoomEnd)-toX(Math.max(60,zoomStart)),height:H-2*pad,fill:"rgba(201,162,39,.06)"}):null,
         // Clutch zone (behind line)
         (mode==="Clutch"&&overlays.length)?overlays[0]:null,
         // WP line(s)
@@ -536,12 +651,13 @@ function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChang
         vLine?h("text",{x:vLine.x+(vLine.x>W/2?-8:8),y:toY(vLine.wp)-8,fill:"var(--gold)",fontSize:"11",fontWeight:"600",textAnchor:vLine.x>W/2?"end":"start"},`${Math.round(vLine.wp*100)}%`):null
       ),
       h("div",{style:{display:"flex",justifyContent:"space-between",fontFamily:"JetBrains Mono",fontSize:".55rem",color:"var(--text-4)",marginTop:".25rem",paddingLeft:`${pad}px`,paddingRight:`${pad}px`}},
-        h("div",null,"0:00"),h("div",null,"HALF"),h("div",null,"END"),hasOT?h("div",null,"OT END"):null
+        h("div",null,effectiveZoom==="Full"?"0:00":effectiveZoom==="Clutch"?"8:00 Q4":`Start ${effectiveZoom}`),
+        h("div",null,effectiveZoom==="Full"?(hasOT?"END":"END"):effectiveZoom==="Clutch"?(hasOT?"OT END":"END"):`End ${effectiveZoom}`)
       ),
       // Vertical line info bar
       vLine&&!tooltip?h("div",{style:{background:"var(--bg-3)",border:"1px solid var(--border-1)",padding:".4rem .7rem",marginTop:".4rem",display:"flex",justifyContent:"space-between",alignItems:"center",fontFamily:"JetBrains Mono",fontSize:".7rem"},onClick:()=>setVLine(null)},
         h("span",{style:{color:"var(--gold)"}},`${Math.round(vLine.wp*100)}% ${homeName}`),
-        h("span",{style:{color:"var(--text-2)"}},`${tn(homeTeam)} ${vLine.homeScore}, ${tn(awayTeam)} ${vLine.awayScore}`),
+        h("span",{style:{color:"var(--text-2)"}},`${shortName(homeTeam)} ${vLine.homeScore}, ${shortName(awayTeam)} ${vLine.awayScore}`),
         h("span",{style:{color:"var(--text-4)"}},"tap to dismiss")
       ):null,
       // Dot tooltip
@@ -912,7 +1028,7 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
   const tags={td:["TD","t-td"],fg:["FG","t-cl"],to:["TURNOVER","t-to"],bg:["BIG PLAY","t-bg"],cl:["CLUTCH","t-cl"],sp:["SPECIAL","t-sp"],"4d":["4TH DOWN","t-bg"]};
   const passCols=["C/ATT","YDS","AVG","TD","INT","QBR"];
   const[wpMode,setWpMode]=useState("Leverage");
-  const[wpModel,setWpModel]=useState("ESPN");
+  const[wpModel,setWpModel]=useState("Both");
   const[catModal,setCatModal]=useState(null);
   const rushCols=["CAR","YDS","AVG","TD","LONG"];
   const recCols=["REC","YDS","AVG","TD","LONG","TGTS"];
@@ -974,7 +1090,7 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
       meth?h("div",{className:"mb"},
         h("h4",null,"How It Works"),"The Excitement Index is built on win probability (WP). We compute home-team WP for every play using an nflfastR-inspired model that incorporates score differential, game time, field position, down & distance, timeouts, and home-field advantage — with exponential time-weighting of score differential (Diff_Time_Ratio) to capture how leads become more decisive as the clock runs down. Games with volatile, uncertain, late-swinging WP curves score highest.",
         h("h4",null,"Leverage (0\u201335)"),"Total absolute WP movement (\u03a3|\u0394WP|) across all plays, weighted toward the single largest swing. A typical NFL game totals ~1.5; classics push above 2.5.",
-        h("h4",null,"Swings (0\u201315)"),"How often WP crossed the 50% midline (true lead changes) and the 40/60% bands (meaningful advantage shifts).",
+        h("h4",null,"Momentum (0\u201315)"),"How often the likely winner changed (WP crossing 50%) and the game shifted between advantage states (40/60% bands).",
         h("h4",null,"Clutch Time (0\u201315)"),"WP movement in the final 8 min of Q4 and all OT. Late swings carry more emotional weight.",
         h("h4",null,"In Doubt (0\u201310)"),"Percentage of the game where WP was between 20% and 80%. Longer uncertainty = more competitive feel.",
         h("h4",null,"Chaos (0\u201310)"),"Play-to-play WP volatility, capturing turnovers, special teams, and big plays without fragile text parsing.",
