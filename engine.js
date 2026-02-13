@@ -71,7 +71,8 @@ function gameElapsedSec(period, clock){
   if(p<=4){
     base=(p-1)*900;
   }else{
-    base=3600 + (p-5)*periodLengthSec(5);
+    // Add 1-second gap so OT plays never overlap with Q4-end plays on the chart
+    base=3601 + (p-5)*periodLengthSec(5);
   }
   return base + elIn;
 }
@@ -277,6 +278,7 @@ function normSpace(s){return String(s||"").replace(/\s+/g," ").trim();}
 export function extractKP(d){
   const plays=getAllPlays(d);
   const homeId=getHomeTeamId(d);
+  const id2abbr=teamIdToAbbrMap(d);
 
   // Build WP map for impact scoring
   const {series:wpSeries}=computeWPSeries(d);
@@ -295,8 +297,10 @@ export function extractKP(d){
     const clock=p.clock?.displayValue||"";
     const down=p.start?.down??p.down??null;
 
-    // SKIP plays with "No Play" (penalty nullified)
+    // SKIP non-plays: penalties, timeouts, two-minute warning, end-of-period markers
     if(lo.includes("no play")||ty.includes("penalty")) continue;
+    if(ty.includes("timeout")||ty.includes("two-minute")||ty==="end period"||ty==="end of half"||ty==="end of game") continue;
+    if(lo.includes("two-minute warning")||lo.includes("timeout")) continue;
 
     let tag=null;
     // Scoring plays (TD, FG, safety)
@@ -308,16 +312,17 @@ export function extractKP(d){
     // Turnovers — must verify possession actually changed
     else if(lo.includes("intercept")||ty.includes("interception")) tag="TO";
     else if(lo.includes("fumble")){
-      // Only tag as turnover if recovered by a different team
-      const recBy=lo.includes("recovered by");
-      const selfRec=/\band\s+recovers\b|\brecovers\s+at\b|\brecovery\s+by\s+\S+\s+at\b/i.test(raw);
-      const driveTeam=(p._driveTeamId!=null)?String(p._driveTeamId):"";
+      // Only tag as turnover if recovered by a different team.
+      // Use drive team ID → abbreviation mapping for reliable comparison.
       const recMatch=raw.match(/recovered\s+by\s+([A-Z]{2,4})[\s-]/i)||raw.match(/RECOVERED\s+([A-Z]{2,4})\b/i);
       const recTeamAbbr=recMatch?recMatch[1]:null;
-      const offTeam=p.team?.abbreviation||"";
-      if(recBy&&!selfRec&&recTeamAbbr&&offTeam&&recTeamAbbr!==offTeam) tag="TO";
-      else if(recBy&&!selfRec&&!offTeam) tag="TO"; // fallback if no team info
-      // If we can't determine, skip — don't tag self-recoveries
+      // Determine the offensive team: prefer drive team abbreviation, fall back to play team
+      const driveAbbr=(p._driveTeamId!=null)?id2abbr.get(String(p._driveTeamId)):null;
+      const offTeam=driveAbbr||p.team?.abbreviation||"";
+      // Self-recovery patterns: "and recovers", "recovers at", offensive player recovering own fumble
+      const selfRec=/\band\s+recovers\b|\brecovers\s+at\b|\brecovery\s+by\s+\S+\s+at\b/i.test(raw);
+      if(recTeamAbbr&&offTeam&&recTeamAbbr!==offTeam&&!selfRec) tag="TO";
+      // If no recovery team found or same team recovered, it's not a turnover — skip
     }
     else if(ty.includes("turnover on downs")) tag="TO";
     // Blocked kicks
@@ -508,17 +513,21 @@ function sortPlaysChrono(plays){
 }
 
 
-export function playTag(text,type){
+export function playTag(text,type,driveTeamAbbr){
   const lo=(text||"").toLowerCase();
   const ty=(type||"").toLowerCase();
   if(lo.includes("intercept")||ty.includes("interception")) return "TO";
   if(lo.includes("turnover on downs")||ty.includes("turnover on downs")) return "TO";
   if(lo.includes("fumble")){
-    // Only tag as turnover if it likely changed possession.
-    // ESPN play text often includes "RECOVERED by <TEAM>-<PLAYER>" for true changes.
-    const recBy = lo.includes("recovered by");
+    // Only tag as turnover if recovered by a DIFFERENT team than offense.
     const selfRec = /\band\s+recovers\b|\brecovers\s+at\b/i.test(text||"");
-    if(recBy && !selfRec) return "TO";
+    if(selfRec) { /* self-recovery, not a turnover */ }
+    else {
+      const recMatch=(text||"").match(/recovered\s+by\s+([A-Z]{2,4})[\s-]/i)||(text||"").match(/RECOVERED\s+([A-Z]{2,4})\b/i);
+      const recAbbr=recMatch?recMatch[1]:null;
+      if(recAbbr&&driveTeamAbbr&&recAbbr===driveTeamAbbr) { /* same team recovered, not a turnover */ }
+      else if(recAbbr) return "TO"; // different team or unknown offense
+    }
   }
   if(lo.includes("blocked")&&(lo.includes("punt")||lo.includes("field goal"))) return "SP";
   if(lo.includes("safety")||ty.includes("safety")) return "SP";
@@ -532,6 +541,7 @@ function computeWPSeries(d){
   if(!playsRaw.length || !homeId) return {series:[], stats:null};
 
   const plays=sortPlaysChrono(playsRaw);
+  const id2abbr=teamIdToAbbrMap(d);
 
   // Prefer ESPN win probability when available (0-1 home win pct)
   const wpMap=new Map();
@@ -609,7 +619,7 @@ function computeWPSeries(d){
       homeScore:lastScore.homeScore,
       awayScore:lastScore.awayScore,
       type:(p.type?.text||""),
-      tag:playTag(p.text||p.shortText||"", p.type?.text||"")
+      tag:playTag(p.text||p.shortText||"", p.type?.text||"", (p._driveTeamId!=null?id2abbr.get(String(p._driveTeamId)):null)||p.team?.abbreviation||"")
     });
   }
 
@@ -902,7 +912,7 @@ function computeWPSeriesPlus(d){
       homeScore:lastScore.homeScore,
       awayScore:lastScore.awayScore,
       type:(p.type?.text||""),
-      tag:playTag(rawText, p.type?.text||"")
+      tag:playTag(rawText, p.type?.text||"", possAbbr||"")
     });
   }
 
@@ -1071,16 +1081,21 @@ function titleizePlay(t){
   // Strip extra point / PAT info and everything after it
   const patIdx=t.toLowerCase().indexOf("extra point");
   if(patIdx>0) t=t.slice(0,patIdx).trim();
-  // Strip kicker parenthetical
+  // Strip kicker parenthetical like "(Harrison Butker Kick)"
   t=t.replace(/\s*\([^)]*\bKick\b[^)]*\)\s*$/i,"").trim();
-  // Strip bare kicker after TOUCHDOWN
+  t=t.replace(/\s*\(\s*kick\s+is\s+(?:good|no\s+good)\s*\)\s*$/i,"").trim();
+  // Strip bare kicker after TOUCHDOWN (before conversion)
   t=t.replace(/\b(TOUCHDOWN)\s*[.,]?\s+[A-Z][a-z]?\.\s*[A-Z][A-Za-z'-]+.*/i, "$1").trim();
   t=t.replace(/\bTD\b/g,"touchdown");
   t=t.replace(/TOUCHDOWN/ig,"touchdown");
-  // Strip trailing kicker after "touchdown"
+  // Strip trailing kicker after "touchdown" (after conversion)
   t=t.replace(/(touchdown)\s+[A-Z][a-z]?\.\s*[A-Z][A-Za-z'-]+.*/i,"$1").trim();
+  // Strip trailing bare last name after yardage — catches "for 19 Yrds Bass", "for 75 Yrds Bass"
+  t=t.replace(/(\d+\s+Yrds?)\s+[A-Z][a-z]+$/i,"$1").trim();
+  t=t.replace(/(for a touchdown)\s+[A-Z][A-Za-z'-]+.*/i,"$1").trim();
   // Strip Center-/Holder- info
   t=t.replace(/,?\s*Center-\S+.*/i,"").trim();
+  t=t.replace(/,?\s*Holder-\S+.*/i,"").trim();
   return t;
 }
 function classifyArchetype(wpSeries){
@@ -1204,8 +1219,21 @@ function extractScoringPlays(d){
           return t.includes("touchdown")||ty.includes("touchdown");
         });
       }
-      // Fallback to last play for FGs or if TD play not found
-      const last=scoringPlay||plays[plays.length-1];
+      // For FGs, find the actual FG play (not end-of-period markers)
+      if(!scoringPlay&&result.includes("field goal")){
+        scoringPlay=plays.find(p=>{
+          const t=(p.text||p.shortText||"").toLowerCase();
+          const ty=(p.type?.text||"").toLowerCase();
+          return t.includes("field goal")||ty.includes("field goal");
+        });
+      }
+      // Fallback to last non-marker play
+      let lastReal=null;
+      for(let i=plays.length-1;i>=0;i--){
+        const ty=(plays[i].type?.text||"").toLowerCase();
+        if(ty!=="end period"&&ty!=="end of half"&&ty!=="end of game"&&!ty.includes("timeout")&&!ty.includes("two-minute")){lastReal=plays[i];break;}
+      }
+      const last=scoringPlay||lastReal||plays[plays.length-1];
       if(last){
         scores.push({
           team,
@@ -1279,21 +1307,25 @@ export function buildSummaryData(g,d,exc){
 
   // Extract notable non-scoring plays: turnovers, 4th downs, sacks, big gains
   const allPlays=getAllPlays(d);
+  const notId2abbr=teamIdToAbbrMap(d);
   const notablePlays=[];
   for(const p of allPlays){
     const txt=normSpace(p.text||p.shortText||"");
     const lo=txt.toLowerCase();
     const ty=(p.type?.text||"").toLowerCase();
     if(lo.includes("(no play)")) continue;
+    // Skip non-plays
+    if(ty.includes("timeout")||ty.includes("two-minute")||ty==="end period"||ty==="end of half"||ty==="end of game") continue;
     const yds=p.statYardage||0;
     const per=p.period?.number||0;
     const clk=p.clock?.displayValue||"";
-    const team=p.team?.abbreviation||p._driveTeamId||"";
+    // Resolve drive team abbreviation reliably
+    const driveAbbr=(p._driveTeamId!=null)?notId2abbr.get(String(p._driveTeamId)):null;
+    const team=driveAbbr||p.team?.abbreviation||"";
     if(lo.includes("intercept")||ty.includes("interception")){
       notablePlays.push({type:"INT",text:txt,period:per,clock:clk,team,yds});
     } else if(lo.includes("fumble")){
       // Only treat as a turnover if the recovery team is different than the offense team.
-      // ESPN formats: "RECOVERED by KC-J.Smith", "recovered by KC", etc.
       const mrec = txt.match(/recovered\s+by\s+([A-Z]{2,4})[\s-]/i) || txt.match(/RECOVERED\s+([A-Z]{2,4})\b/i);
       const rec = mrec ? mrec[1] : null;
       const selfRec = /\band\s+recovers\b|\brecovers\s+at\b/i.test(txt);
