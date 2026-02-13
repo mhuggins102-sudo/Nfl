@@ -67,8 +67,9 @@ function _humanizePlay(raw){
   // ", TOUCHDOWN" → " for a touchdown"
   s=s.replace(/,?\s*TOUCHDOWN/gi, " for a touchdown");
   // Strip trailing kicker/holder after "for a touchdown" — catches "for a touchdown Butker" or "for a touchdown Bass"
-  // Also catches multiple trailing words like "for a touchdown Butker kick is good"
   s=s.replace(/(for a touchdown)\s+[A-Z][A-Za-z'-]+.*/i, "$1");
+  // Strip trailing bare last name after yardage — catches "for 19 Yrds Bass", "for 75 Yrds Bass"
+  s=s.replace(/(\d+\s+Yrds?)\s+[A-Z][a-z]+$/i,"$1");
   // "for no gain"
   s=s.replace(/for no gain/g,"for no gain");
   // Remove "No Play" completely
@@ -321,7 +322,58 @@ function buildRecap(sum){
 
   if(narr.trim()) paragraphs.push(narr.trim());
 
-  // ── P3: FOURTH QUARTER + OT — detailed coverage of late-game drama ──
+  // ── P3: FOURTH QUARTER + OT — natural sportswriter narrative ──
+  // Helper: extract a compact play description from humanized text
+  // e.g. "Allen pass to Davis for 27 Yrds for a touchdown" → "a 27-yard TD pass from Allen to Davis"
+  function _playDesc(sp){
+    const txt=_humanizePlay(sp.text||"");
+    if(!txt)return null;
+    const lo=txt.toLowerCase();
+    const isTD=sp.type==="TD"||lo.includes("touchdown");
+    const isFG=sp.type==="FG"||lo.includes("field goal");
+    // Try to extract yardage
+    const yM=txt.match(/(\d+)\s*(?:Yrds?|yards?|Yd)/i);
+    const yds=yM?+yM[1]:0;
+    // Try to extract player names from the play
+    // Patterns: "Name pass to Name for X Yrds", "Name X Yd Rush", "Name X Yd pass from Name"
+    const passTo=txt.match(/^(\S+)\s+pass\s+to\s+(\S+)/i);
+    const passFrom=txt.match(/^(\S+)\s+.*?pass\s+from\s+(\S+)/i);
+    const rush=txt.match(/^(\S+)\s+\d+\s*(?:Yd|Yard)/i);
+    const fgM=txt.match(/^(\S+)\s+\d+\s*(?:Yd|Yard)\s+Field Goal/i);
+    if(isFG){
+      const kicker=fgM?_capName(fgM[1]):null;
+      if(kicker&&yds) return `a ${yds}-yard field goal by ${kicker}`;
+      if(yds) return `a ${yds}-yard field goal`;
+      return "a field goal";
+    }
+    if(isTD){
+      if(passFrom&&yds){
+        const receiver=_capName(passFrom[1]);
+        const qb=_capName(passFrom[2]);
+        return `a ${yds}-yard TD pass from ${qb} to ${receiver}`;
+      }
+      if(passTo&&yds){
+        const qb=_capName(passTo[1]);
+        const receiver=_capName(passTo[2]);
+        return `a ${yds}-yard TD pass from ${qb} to ${receiver}`;
+      }
+      if(rush&&yds){
+        const runner=_capName(rush[1]);
+        return `a ${yds}-yard TD run by ${runner}`;
+      }
+      if(yds) return `a ${yds}-yard touchdown`;
+      return "a touchdown";
+    }
+    // Non-TD/FG play
+    if(yds>=20) return `a ${yds}-yard play`;
+    return txt.length>60?txt.slice(0,60)+"...":txt;
+  }
+  // Helper: short mascot-style team name from abbreviation
+  function _short(abbr){
+    const full=TEAMS[abbr];if(!full)return abbr;
+    const parts=full.split(" ");return parts[parts.length-1];
+  }
+
   let lateNarr="";
   const q4Scores=timeline.filter(t=>t.period===4&&t.source==="score");
   const q4TOs=timeline.filter(t=>t.period===4&&t.source==="turnover");
@@ -330,54 +382,111 @@ function buildRecap(sum){
 
   // Determine the game state entering Q4
   const q4Start=q4?(q4.startHS-q4.startAS):q3Lead;
-  const q4Leader=q4Start>0?hN:q4Start<0?aN:null;
+  const q4Leader=q4Start>0?_short(sum.homeTeam):q4Start<0?_short(sum.awayTeam):null;
   const q4StartHigh=q4?Math.max(q4.startHS,q4.startAS):0;
   const q4StartLow=q4?Math.min(q4.startHS,q4.startAS):0;
 
   if(lateScores.length>=3||(lateScores.length>=2&&hasOT)){
-    // Dramatic late game — describe play-by-play
-    if(q4Leader&&Math.abs(q4Start)<=7) lateNarr+=`Entering the fourth quarter with ${q4Leader} up ${q4StartHigh}-${q4StartLow}, `;
-    else if(q4Leader&&Math.abs(q4Start)>7) lateNarr+=`With ${q4Leader} ahead ${q4StartHigh}-${q4StartLow} entering the fourth, `;
-    else if(!q4Leader&&q4StartHigh>0) lateNarr+=`With the game knotted ${q4StartHigh}-all entering the fourth, `;
-    else lateNarr+=`In the fourth quarter, `;
+    // Dramatic late game — natural play-by-play sentences
+    if(q4Leader&&q4StartHigh>0) lateNarr+=`Entering the fourth quarter, the ${q4Leader} led ${q4StartHigh}-${q4StartLow}. `;
+    else if(!q4Leader&&q4StartHigh>0) lateNarr+=`Entering the fourth quarter, the game was tied ${q4StartHigh}-all. `;
 
-    // Describe each late scoring play
-    const latePlays=lateScores.slice(0,5); // cap at 5 for readability
-    const playDescs=latePlays.map(s=>{
-      const teamName=tn(s.team);
-      const line=_scoreLine(s);
-      return `${teamName}: ${line}`;
-    });
-    lateNarr+=`the scoring came fast. ${playDescs.join(". ")}. `;
+    if(lateScores.length>=3) lateNarr+=`Scoring was heavy during the game's final minutes. `;
+
+    // Track the running score as we narrate
+    let prevHS=q4?q4.startHS:(q3?q3.endHS:0);
+    let prevAS=q4?q4.startAS:(q3?q3.endAS:0);
+    let prevLeader=prevHS>prevAS?"home":prevAS>prevHS?"away":"tied";
+
+    const allLate=lateScores.slice(0,7); // cap for readability
+    for(let i=0;i<allLate.length;i++){
+      const sp=allLate[i];
+      const desc=_playDesc(sp);
+      if(!desc)continue;
+      const teamShort=_short(sp.team);
+      const curHS=sp.homeScore!=null?+sp.homeScore:prevHS;
+      const curAS=sp.awayScore!=null?+sp.awayScore:prevAS;
+      const curLeader=curHS>curAS?"home":curAS>curHS?"away":"tied";
+      const curHigh=Math.max(curHS,curAS), curLow=Math.min(curHS,curAS);
+      const curLeaderName=curLeader==="home"?_short(sum.homeTeam):curLeader==="away"?_short(sum.awayTeam):null;
+
+      // Build natural time reference
+      let timeRef="";
+      if(sp.clock){
+        const clkSec=parseClockStr(sp.clock);
+        const per=sp.period<=4?"remaining in the game":"remaining in overtime";
+        if(clkSec!=null&&clkSec<=30) timeRef=`with just ${sp.clock} ${per}`;
+        else if(clkSec!=null&&clkSec<=120) timeRef=`with ${sp.clock} ${per}`;
+        else if(sp.clock) timeRef=`with ${sp.clock} ${per}`;
+      }
+
+      // Determine narrative verb/framing based on score change
+      const leadChanged=(curLeader!==prevLeader&&prevLeader!=="tied"&&curLeader!=="tied");
+      const tookLead=(curLeader!=="tied"&&prevLeader==="tied");
+      const tiedIt=(curLeader==="tied"&&prevLeader!=="tied");
+      const extendedLead=(curLeader===prevLeader&&curLeader!=="tied"&&(curHigh-curLow)>(Math.max(prevHS,prevAS)-Math.min(prevHS,prevAS)));
+
+      let sentence="";
+      if(tiedIt){
+        sentence=`The ${teamShort} tied it at ${curHigh} on ${desc}`;
+        if(timeRef) sentence+=` ${timeRef}`;
+      } else if(leadChanged){
+        sentence=`The ${teamShort} went back on top ${curHigh}-${curLow} on ${desc}`;
+        if(timeRef) sentence+=` ${timeRef}`;
+      } else if(tookLead){
+        sentence=`The ${teamShort} took the lead ${curHigh}-${curLow} on ${desc}`;
+        if(timeRef) sentence+=` ${timeRef}`;
+      } else if(extendedLead){
+        sentence=`The ${teamShort} extended their lead to ${curHigh}-${curLow} on ${desc}`;
+        if(timeRef) sentence+=` ${timeRef}`;
+      } else {
+        sentence=`The ${teamShort} scored on ${desc}`;
+        if(timeRef) sentence+=` ${timeRef}`;
+        if(curLeaderName) sentence+=`, making it ${curHigh}-${curLow}`;
+        else sentence+=`, tying it ${curHigh}-all`;
+      }
+      lateNarr+=sentence+". ";
+      prevHS=curHS; prevAS=curAS; prevLeader=curLeader;
+    }
 
     if(hasOT&&otScores.length>0){
-      lateNarr+=`In overtime, ${W} finished it off`;
-      const otWinner=otScores.find(s=>tn(s.team)===W);
-      if(otWinner){
-        const otLine=_scoreLine(otWinner);
-        lateNarr+=` with ${otLine}`;
+      // Check if OT was already narrated above
+      const otNarrated=allLate.some(s=>s.period>4);
+      if(!otNarrated){
+        lateNarr+=`In overtime, the ${_short(wAb)} finished it off`;
+        const otWinner=otScores.find(s=>s.team===wAb);
+        const desc=otWinner?_playDesc(otWinner):null;
+        if(desc) lateNarr+=` with ${desc}`;
+        lateNarr+=` for a ${scoreStr} win. `;
       }
-      lateNarr+=`. `;
     } else if(hasOT){
-      lateNarr+=`The game went to overtime where ${W} prevailed. `;
+      lateNarr+=`The game went to overtime where the ${_short(wAb)} prevailed ${scoreStr}. `;
     }
   } else if(lateScores.length>=1){
-    // Some late scoring
+    // Some late scoring — still use natural language
     if(q4Scores.length>0){
-      const bigQ4=q4Scores[q4Scores.length-1]; // last Q4 score is often decisive
-      const teamName=tn(bigQ4.team);
-      if(q4Leader&&Math.abs(q4Start)<=3){
-        lateNarr+=`The fourth quarter came down to the wire. ${teamName} scored with ${_scoreLine(bigQ4)}. `;
-      } else {
-        lateNarr+=`In the fourth quarter, ${teamName} scored with ${_scoreLine(bigQ4)}. `;
+      const bigQ4=q4Scores[q4Scores.length-1];
+      const teamShort=_short(bigQ4.team);
+      const desc=_playDesc(bigQ4);
+      if(desc){
+        if(q4Leader&&Math.abs(q4Start)<=3){
+          lateNarr+=`The fourth quarter came down to the wire. The ${teamShort} scored on ${desc}`;
+        } else {
+          lateNarr+=`In the fourth quarter, the ${teamShort} scored on ${desc}`;
+        }
+        if(bigQ4.clock) lateNarr+=` with ${bigQ4.clock} remaining`;
+        if(bigQ4.homeScore!=null&&bigQ4.awayScore!=null){
+          const h=Math.max(+bigQ4.homeScore,+bigQ4.awayScore),l=Math.min(+bigQ4.homeScore,+bigQ4.awayScore);
+          if(+bigQ4.homeScore===+bigQ4.awayScore) lateNarr+=`, tying it at ${h}`;
+          else lateNarr+=`, making it ${h}-${l}`;
+        }
+        lateNarr+=`. `;
       }
     }
-    if(hasOT) lateNarr+=`After regulation ended tied, ${W} won it in overtime. `;
+    if(hasOT) lateNarr+=`After regulation ended tied, the ${_short(wAb)} won it in overtime ${scoreStr}. `;
   } else if(arche==="wire"&&margin>=14){
-    // Blowout — no late scoring needed
-    lateNarr+=`The fourth quarter was garbage time as ${W} cruised to the finish. `;
+    lateNarr+=`The fourth quarter was garbage time as the ${_short(wAb)} cruised to the finish. `;
   } else if(q4TOs.length>0){
-    // Turnovers were the story of Q4
     lateNarr+=`The fourth quarter was shaped by ${q4TOs.length} turnover${q4TOs.length>1?"s":""} as both teams tried to close it out. `;
   }
 
