@@ -105,3 +105,50 @@ body::after{content:'';position:fixed;inset:0;background:radial-gradient(ellipse
 /* layout fix: keep Week + Type on same row */
 .fld-row{display:flex;gap:.75rem;align-items:flex-end;flex-wrap:wrap}
 .fld-row .fld{flex:1 1 220px}
+
+/* Player links to Pro Football Reference */
+.pfr-link{color:inherit;text-decoration:none;border-bottom:1px solid transparent;transition:border-color .15s,color .15s}
+.pfr-link:hover{color:var(--gold);border-bottom-color:var(--gold)}
+
+/* YouTube highlights button */
+.hl-btn{display:inline-flex;align-items:center;gap:.4rem;font-family:'Oswald',sans-serif;font-size:.8rem;font-weight:500;letter-spacing:.06em;text-transform:uppercase;background:var(--bg-3);border:1px solid var(--border-1);color:var(--text-2);padding:.45rem 1rem;cursor:pointer;transition:all .15s;text-decoration:none;margin-top:.6rem}
+.hl-btn:hover{border-color:var(--gold-dim);color:var(--gold)}
+.hl-btn svg{width:16px;height:16px;fill:currentColor}
+
+/* WP Chart hover crosshair */
+.wp-hover-bar{background:var(--bg-3);border:1px solid var(--border-1);padding:.35rem .7rem;display:flex;justify-content:space-between;align-items:center;font-family:'JetBrains Mono',monospace;font-size:.7rem;min-height:1.8rem;transition:opacity .1s}
+
+/* Scoring markers on WP chart */
+.score-marker{cursor:pointer;transition:opacity .15s}
+.score-marker:hover{opacity:1!important}
+
+/* Radial excitement gauge */
+.radial-gauge{position:relative;width:140px;height:140px;margin:0 auto}
+.radial-gauge svg{width:100%;height:100%}
+.radial-gauge .gauge-label{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.radial-gauge .gauge-score{font-family:'Oswald',sans-serif;font-size:2.8rem;font-weight:700;line-height:1}
+.radial-gauge .gauge-grade{font-family:'Oswald',sans-serif;font-size:.9rem;font-weight:600;letter-spacing:.06em;margin-top:.1rem}
+
+/* Sparkline in game list */
+.spark{flex-shrink:0;margin-left:.5rem}
+
+/* Tabs for detail view */
+.tab-bar{display:flex;gap:0;border-bottom:1px solid var(--border-1);margin-bottom:1.25rem}
+.tab-btn{font-family:'Oswald',sans-serif;font-size:.85rem;font-weight:500;letter-spacing:.06em;text-transform:uppercase;background:none;border:none;border-bottom:2px solid transparent;color:var(--text-3);padding:.6rem 1.2rem;cursor:pointer;transition:all .15s}
+.tab-btn:hover{color:var(--text-2)}
+.tab-btn.active{color:var(--gold);border-bottom-color:var(--gold)}
+
+/* Card hover micro-interactions */
+.gc{transition:border-color .15s,transform .12s,box-shadow .15s}
+.gc:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.3)}
+
+/* Animated score count-up gauge bar */
+.hero-ebf{transition:width 1.5s cubic-bezier(.16,1,.3,1)}
+
+/* WP chart line drawing animation */
+@keyframes drawLine{from{stroke-dashoffset:var(--line-len)}to{stroke-dashoffset:0}}
+.wp-line-anim{animation:drawLine 1.5s ease-out forwards}
+
+/* Score marker triangle */
+.score-tri{transition:transform .1s}
+.score-tri:hover{transform:scale(1.5)}

@@ -550,12 +550,16 @@ function buildRecap(sum){
 }
 
 
-// ── WP Chart: vertical line on tap, bigger dots, OT x-axis fix ──
+// ── WP Chart: hover crosshair, scoring markers, overlays, animations ──
 
-function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChange, exc, topLev, homeTeam, awayTeam}){
+function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChange, exc, topLev, homeTeam, awayTeam, scoringPlays}){
   const [tooltip,setTooltip]=useState(null);
   const [vLine,setVLine]=useState(null);
-  const [zoom,setZoom]=useState("Full"); // "Full","Q1","Q2","Q3","Q4","Clutch"
+  const [hover,setHover]=useState(null); // live hover crosshair
+  const [pinned,setPinned]=useState(false); // whether vLine is pinned by click
+  const [zoom,setZoom]=useState("Full");
+  const [scoreMarkerTip,setScoreMarkerTip]=useState(null);
+  const svgRef=useRef(null);
 
   const activeSeries = (modelSel==="Alt") ? (seriesAlt||[]) : (seriesE||[]);
   const bothSeries = (modelSel==="Both");
@@ -569,20 +573,15 @@ function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChang
   const hasOT=maxTMin>60;
   const otMaxMin=hasOT?Math.ceil(maxTMin/5)*5:60;
 
-  // Auto-zoom on Clutch
   const effectiveZoom=(mode==="Clutch")?"Clutch":zoom;
-
-  // Zoom ranges (in game-minutes)
   const zoomRanges={Full:[0,otMaxMin],Q1:[0,15],Q2:[15,30],Q3:[30,45],Q4:[45,60],Clutch:[52,otMaxMin]};
   const [zoomStart,zoomEnd]=zoomRanges[effectiveZoom]||[0,otMaxMin];
 
-  const W=860,H=200,pad=28;
+  const W=860,H=220,pad=28,markerY=H-8;
   const chartW=W-2*pad;
-  // Simple linear mapping from zoomStart..zoomEnd to chart area
   const toX=t=>pad+((t-zoomStart)/(zoomEnd-zoomStart))*chartW;
-  const toY=wp=>pad+(1-wp)*(H-2*pad);
+  const toY=wp=>pad+(1-wp)*(H-2*pad-16); // leave room for scoring markers at bottom
 
-  // Filter series to zoom range
   const inRange=s=>s&&s.tMin!=null&&s.wp!=null&&s.tMin>=zoomStart&&s.tMin<=zoomEnd;
   const step=Math.max(1,Math.floor(activeSeries.length/500));
   const pts=[];
@@ -603,21 +602,37 @@ function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChang
     if(pts2.length>1) pathAlt="M "+pts2.map(p=>p[0].toFixed(2)+" "+p[1].toFixed(2)).join(" L ");
   }
 
-  // Quarter dividers and labels (only for visible range)
+  // Quarter dividers and labels
   const qDividers=[];
   const qLabels=[];
   const quarters=[{q:1,s:0,e:15},{q:2,s:15,e:30},{q:3,s:30,e:45},{q:4,s:45,e:60}];
   if(hasOT) quarters.push({q:5,s:60,e:otMaxMin});
   for(const qr of quarters){
-    // Show label if quarter overlaps the zoom range at all
     const overlapStart=Math.max(qr.s,zoomStart), overlapEnd=Math.min(qr.e,zoomEnd);
     if(overlapEnd>overlapStart){
       const mid=(overlapStart+overlapEnd)/2;
       qLabels.push({x:toX(mid),label:qr.q<=4?`Q${qr.q}`:"OT",isOT:qr.q>4});
     }
-    // Divider at end of quarter if it's within range
     if(qr.e>zoomStart&&qr.e<zoomEnd&&qr.q<5) qDividers.push(toX(qr.e));
     if(qr.q===4&&hasOT&&60>zoomStart&&60<zoomEnd) qDividers.push(toX(60));
+  }
+
+  // Build scoring marker data from the series (detect score changes)
+  const scoreMarkers=[];
+  let prevSc={h:activeSeries[0]?.homeScore||0, a:activeSeries[0]?.awayScore||0};
+  for(let i=1;i<activeSeries.length;i++){
+    const s=activeSeries[i];
+    const curH=s.homeScore||0, curA=s.awayScore||0;
+    if((curH!==prevSc.h || curA!==prevSc.a) && s.tMin!=null && s.tMin>=zoomStart && s.tMin<=zoomEnd){
+      const isHome=(curH>prevSc.h);
+      const isTD=(curH-prevSc.h>=6)||(curA-prevSc.a>=6);
+      const isFG=!isTD&&((curH-prevSc.h>=3)||(curA-prevSc.a>=3));
+      scoreMarkers.push({x:toX(s.tMin), isHome, isTD, isFG,
+        homeScore:curH, awayScore:curA,
+        text:_humanizePlay(s.text)||`Score: ${curH}-${curA}`,
+        period:s.period, clock:s.clock, tMin:s.tMin, wp:s.wp});
+      prevSc={h:curH, a:curA};
+    }
   }
 
   const overlays=[];
@@ -640,7 +655,6 @@ function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChang
       });
     });
   }else if(mode==="Momentum"){
-    // Show significant momentum shifts — WP swings > 5% that cross 50%, plus any swing > 12%
     for(let i=1;i<activeSeries.length;i++){
       const s=activeSeries[i];
       const prev=activeSeries[i-1];
@@ -674,15 +688,43 @@ function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChang
     }
   }else if(mode==="Clutch"){
     const clutchStart=Math.max(52, otMaxMin-8);
-    overlays.push(h("rect",{key:"clutch-zone",x:toX(clutchStart),y:pad,width:toX(otMaxMin)-toX(clutchStart),height:H-2*pad,fill:"rgba(201,162,39,.08)"}));
+    overlays.push(h("rect",{key:"clutch-zone",x:toX(clutchStart),y:pad,width:toX(otMaxMin)-toX(clutchStart),height:H-2*pad-16,fill:"rgba(201,162,39,.08)"}));
   }
 
-  function handleSVGClick(e){
+  // Find nearest play to a given tMin
+  function findNearest(tMin){
+    let nearest=null,nearDist=Infinity;
+    for(const s of activeSeries){
+      if(s.tMin==null)continue;
+      const d=Math.abs(s.tMin-tMin);
+      if(d<nearDist){nearDist=d;nearest=s;}
+    }
+    return nearest;
+  }
+
+  function svgCoords(e){
     const svg=e.currentTarget;
     const rect=svg.getBoundingClientRect();
     const scaleX=W/rect.width;
-    const cx=(e.clientX-rect.left)*scaleX;
-    const cy=(e.clientY-rect.top)*(H/rect.height);
+    return {cx:(e.clientX-rect.left)*scaleX, cy:(e.clientY-rect.top)*(H/rect.height)};
+  }
+
+  function handleSVGMove(e){
+    if(pinned)return; // Don't update hover when pinned
+    const {cx}=svgCoords(e);
+    const tMin=zoomStart+((cx-pad)/chartW)*(zoomEnd-zoomStart);
+    const nearest=findNearest(tMin);
+    if(nearest){
+      setHover({x:toX(nearest.tMin), wp:nearest.wp, tMin:nearest.tMin, homeScore:nearest.homeScore, awayScore:nearest.awayScore, text:_humanizePlay(nearest.text)||""});
+    }
+  }
+
+  function handleSVGLeave(){
+    if(!pinned) setHover(null);
+  }
+
+  function handleSVGClick(e){
+    const {cx,cy}=svgCoords(e);
 
     // Check if we hit a dot first
     let best=null,bestDist=Infinity;
@@ -694,87 +736,142 @@ function WPChart({seriesE, seriesAlt, modelSel, onModelChange, mode, onModeChang
     if(best){
       setTooltip(best);
       setVLine({x:best.cx, wp:best.wp, tMin:best.tMin, homeScore:best.homeScore, awayScore:best.awayScore});
+      setPinned(true);
+      setHover(null);
       return;
     }
 
-    // Otherwise, find nearest play in time for vertical line
-    // Reverse the linear toX mapping to get time from pixel position
-    const clickTMin=zoomStart+((cx-pad)/chartW)*(zoomEnd-zoomStart);
-    let nearest=null,nearDist=Infinity;
-    for(const s of activeSeries){
-      if(s.tMin==null)continue;
-      const d=Math.abs(s.tMin-clickTMin);
-      if(d<nearDist){nearDist=d;nearest=s;}
+    // Check if we hit a scoring marker
+    for(const sm of scoreMarkers){
+      if(Math.abs(cx-sm.x)<8 && cy>=markerY-10){
+        setScoreMarkerTip(sm);
+        setVLine({x:sm.x, wp:sm.wp, tMin:sm.tMin, homeScore:sm.homeScore, awayScore:sm.awayScore});
+        setPinned(true);
+        setHover(null);
+        return;
+      }
     }
+
+    // Toggle pin on/off
+    if(pinned){
+      setPinned(false);
+      setVLine(null);
+      setTooltip(null);
+      setScoreMarkerTip(null);
+      return;
+    }
+
+    const clickTMin=zoomStart+((cx-pad)/chartW)*(zoomEnd-zoomStart);
+    const nearest=findNearest(clickTMin);
     if(nearest){
       setVLine({x:toX(nearest.tMin), wp:nearest.wp, tMin:nearest.tMin, homeScore:nearest.homeScore, awayScore:nearest.awayScore});
+      setPinned(true);
+      setHover(null);
       setTooltip(null);
+      setScoreMarkerTip(null);
     }
   }
 
   const homeName=shortName(homeTeam)||"Home";
   const awayName=shortName(awayTeam)||"Away";
+  const activeVLine=pinned?vLine:hover;
+
+  const selStyle={background:"var(--bg-3)",border:"1px solid var(--border-1)",color:"var(--text-1)",padding:".35rem .5rem",fontFamily:"JetBrains Mono",fontSize:".7rem"};
+  const lblStyle={fontFamily:"JetBrains Mono",fontSize:".65rem",letterSpacing:".08em",textTransform:"uppercase",color:"var(--text-3)"};
 
   return h("div",{className:"sec"},
     h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:"1rem",flexWrap:"wrap"}},
       h("div",{className:"sec-h",style:{borderBottom:"none",marginBottom:"0"}},`Win Probability (${homeName})${modelSel==="Alt"?" — nflfastR Model":""}`),
-      h("div",{style:{display:"flex",alignItems:"center",gap:".5rem"}},
-        h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".65rem",letterSpacing:".08em",textTransform:"uppercase",color:"var(--text-3)"}},"Model"),
-        h("select",{value:modelSel,onChange:e=>{onModelChange(e.target.value);setTooltip(null);setVLine(null);},style:{background:"var(--bg-3)",border:"1px solid var(--border-1)",color:"var(--text-1)",padding:".35rem .5rem",fontFamily:"JetBrains Mono",fontSize:".7rem"}},
+      h("div",{style:{display:"flex",alignItems:"center",gap:".5rem",flexWrap:"wrap"}},
+        h("div",{style:lblStyle},"Model"),
+        h("select",{value:modelSel,onChange:e=>{onModelChange(e.target.value);setTooltip(null);setVLine(null);setPinned(false);},style:selStyle},
           [ ["ESPN","ESPN"], ["nflfastR","Alt"], ["Both","Both"] ].map(o=>h("option",{key:o[0],value:o[1]},o[0]))),
-        h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".65rem",letterSpacing:".08em",textTransform:"uppercase",color:"var(--text-3)",marginLeft:".4rem"}},"Overlay"),
-        h("select",{value:mode,onChange:e=>{onModeChange(e.target.value);setTooltip(null);setVLine(null);},style:{background:"var(--bg-3)",border:"1px solid var(--border-1)",color:"var(--text-1)",padding:".35rem .5rem",fontFamily:"JetBrains Mono",fontSize:".7rem"}},
+        h("div",{style:{...lblStyle,marginLeft:".4rem"}},"Overlay"),
+        h("select",{value:mode,onChange:e=>{onModeChange(e.target.value);setTooltip(null);setVLine(null);setPinned(false);},style:selStyle},
           ["Leverage","Momentum","Chaos","Clutch"].map(o=>h("option",{key:o,value:o},o))),
-        h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".65rem",letterSpacing:".08em",textTransform:"uppercase",color:"var(--text-3)",marginLeft:".4rem"}},"Zoom"),
-        h("select",{value:effectiveZoom,onChange:e=>{setZoom(e.target.value);setTooltip(null);setVLine(null);},disabled:mode==="Clutch",style:{background:"var(--bg-3)",border:"1px solid var(--border-1)",color:mode==="Clutch"?"var(--text-4)":"var(--text-1)",padding:".35rem .5rem",fontFamily:"JetBrains Mono",fontSize:".7rem"}},
+        h("div",{style:{...lblStyle,marginLeft:".4rem"}},"Zoom"),
+        h("select",{value:effectiveZoom,onChange:e=>{setZoom(e.target.value);setTooltip(null);setVLine(null);setPinned(false);},disabled:mode==="Clutch",style:{...selStyle,color:mode==="Clutch"?"var(--text-4)":"var(--text-1)"}},
           ["Full","Q1","Q2","Q3","Q4"].concat(hasOT?["Clutch"]:[]).map(o=>h("option",{key:o,value:o},o==="Clutch"?"Clutch (Q4+OT)":o))))),
     h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".6rem",color:"var(--text-4)",marginTop:".3rem",marginBottom:".2rem"}},
-      mode==="Leverage"?"Gold dots = highest WP swings. Tap dots for play details, or tap anywhere for score.":
-      mode==="Momentum"?"Blue dots = likely winner changes (>50%) and big momentum shifts. Tap for details.":
-      mode==="Chaos"?"Red dots = turnovers and special teams plays. Tap for details.":
-      "Gold zone = final 8 min of Q4 + OT. Tap anywhere for WP at that point."),
+      "Hover to track WP. Click to pin. Triangles = scoring plays.",
+      mode==="Leverage"?" Gold dots = highest WP swings.":
+      mode==="Momentum"?" Blue dots = momentum shifts.":
+      mode==="Chaos"?" Red dots = turnovers & special teams.":
+      " Gold zone = clutch time."),
     h("div",{style:{border:"1px solid var(--border-1)",background:"var(--bg-2)",padding:".6rem .6rem .2rem",position:"relative"}},
-      h("svg",{viewBox:`0 0 ${W} ${H}`,width:"100%",height:"auto",preserveAspectRatio:"none",onClick:handleSVGClick,style:{cursor:"pointer"}},
+      h("svg",{ref:svgRef,viewBox:`0 0 ${W} ${H}`,width:"100%",height:"auto",preserveAspectRatio:"none",
+        onClick:handleSVGClick,onMouseMove:handleSVGMove,onMouseLeave:handleSVGLeave,
+        style:{cursor:"crosshair",display:"block"}},
         // Y-axis labels
         h("text",{x:pad-4,y:toY(1),fill:"var(--text-4)",fontSize:"9",textAnchor:"end",dominantBaseline:"middle"},"100%"),
+        h("text",{x:pad-4,y:toY(0.75),fill:"var(--text-4)",fontSize:"8",textAnchor:"end",dominantBaseline:"middle",opacity:.5},"75%"),
         h("text",{x:pad-4,y:toY(0.5),fill:"var(--text-4)",fontSize:"9",textAnchor:"end",dominantBaseline:"middle"},"50%"),
+        h("text",{x:pad-4,y:toY(0.25),fill:"var(--text-4)",fontSize:"8",textAnchor:"end",dominantBaseline:"middle",opacity:.5},"25%"),
         h("text",{x:pad-4,y:toY(0),fill:"var(--text-4)",fontSize:"9",textAnchor:"end",dominantBaseline:"middle"},"0%"),
-        // Midline
+        // 25/75% gridlines
+        h("line",{x1:toX(zoomStart),y1:toY(0.75),x2:toX(zoomEnd),y2:toY(0.75),stroke:"rgba(136,146,164,.12)",strokeWidth:"1",strokeDasharray:"2 4"}),
+        h("line",{x1:toX(zoomStart),y1:toY(0.25),x2:toX(zoomEnd),y2:toY(0.25),stroke:"rgba(136,146,164,.12)",strokeWidth:"1",strokeDasharray:"2 4"}),
+        // 50% midline
         h("line",{x1:toX(zoomStart),y1:toY(0.5),x2:toX(zoomEnd),y2:toY(0.5),stroke:"rgba(136,146,164,.35)",strokeWidth:"1",strokeDasharray:"4 4"}),
         // Quarter dividers
-        ...qDividers.map((x,i)=>h("line",{key:`qd-${i}`,x1:x,y1:pad,x2:x,y2:H-pad,stroke:"rgba(136,146,164,.2)",strokeWidth:"1"})),
+        ...qDividers.map((x,i)=>h("line",{key:`qd-${i}`,x1:x,y1:pad,x2:x,y2:H-pad-16,stroke:"rgba(136,146,164,.2)",strokeWidth:"1"})),
         // Quarter labels at top
         ...qLabels.map((l,i)=>h("text",{key:`ql-${i}`,x:l.x,y:pad-6,fill:l.label==="OT"?"var(--gold)":"rgba(136,146,164,.5)",fontSize:l.label==="OT"?"10":"9",fontWeight:l.label==="OT"?"600":"400",textAnchor:"middle",fontFamily:"JetBrains Mono"},l.label)),
         // OT background highlight
-        (hasOT&&zoomEnd>60)?h("rect",{x:toX(Math.max(60,zoomStart)),y:pad,width:toX(zoomEnd)-toX(Math.max(60,zoomStart)),height:H-2*pad,fill:"rgba(201,162,39,.06)"}):null,
-        // Clutch zone (behind line)
+        (hasOT&&zoomEnd>60)?h("rect",{x:toX(Math.max(60,zoomStart)),y:pad,width:toX(zoomEnd)-toX(Math.max(60,zoomStart)),height:H-2*pad-16,fill:"rgba(201,162,39,.06)"}):null,
+        // Clutch zone
         (mode==="Clutch"&&overlays.length)?overlays[0]:null,
         // WP line(s)
-        h("path",{d:path,fill:"none",stroke:"rgba(232,236,240,.85)",strokeWidth:"2"}),
-        (pathAlt? h("path",{d:pathAlt,fill:"none",stroke:"rgba(61,142,212,.7)",strokeWidth:"2"}) : null),
+        h("path",{d:path,fill:"none",stroke:"rgba(232,236,240,.85)",strokeWidth:"2",strokeLinejoin:"round"}),
+        (pathAlt? h("path",{d:pathAlt,fill:"none",stroke:"rgba(61,142,212,.7)",strokeWidth:"2",strokeLinejoin:"round"}) : null),
+        // Scoring markers along bottom (small triangles)
+        ...scoreMarkers.map((sm,i)=>{
+          const color=sm.isHome?"var(--blue)":"var(--red)";
+          const size=sm.isTD?5:3.5;
+          return h("polygon",{key:`sm-${i}`,
+            points:`${sm.x},${markerY-size*2} ${sm.x-size},${markerY} ${sm.x+size},${markerY}`,
+            fill:color,opacity:.7,className:"score-tri",
+            style:{cursor:"pointer"}});
+        }),
+        // Scoring marker labels (team abbreviations)
+        ...scoreMarkers.filter((_,i)=>i<15).map((sm,i)=>h("text",{key:`sml-${i}`,x:sm.x,y:markerY+8,fill:"var(--text-4)",fontSize:"6",textAnchor:"middle",fontFamily:"JetBrains Mono"},
+          `${sm.homeScore}-${sm.awayScore}`)),
         // Overlay dots
         ...(mode==="Clutch"?overlays.slice(1):overlays),
-        // Vertical cursor line
-        vLine?h("line",{x1:vLine.x,y1:pad,x2:vLine.x,y2:H-pad,stroke:"var(--gold)",strokeWidth:"1",strokeDasharray:"3 3",opacity:.7}):null,
+        // Hover crosshair (not pinned)
+        activeVLine?h("line",{x1:activeVLine.x,y1:pad,x2:activeVLine.x,y2:H-pad-16,stroke:pinned?"var(--gold)":"rgba(201,162,39,.5)",strokeWidth:"1",strokeDasharray:pinned?"3 3":"2 3",opacity:pinned?.7:.5}):null,
+        // WP dot on the line at cursor position
+        activeVLine?h("circle",{cx:activeVLine.x,cy:toY(activeVLine.wp),r:3.5,fill:pinned?"var(--gold)":"rgba(201,162,39,.7)",stroke:"none"}):null,
         // WP percentage label at cursor
-        vLine?h("text",{x:vLine.x+(vLine.x>W/2?-8:8),y:toY(vLine.wp)-8,fill:"var(--gold)",fontSize:"11",fontWeight:"600",textAnchor:vLine.x>W/2?"end":"start"},`${Math.round(vLine.wp*100)}%`):null
+        activeVLine?h("text",{x:activeVLine.x+(activeVLine.x>W/2?-8:8),y:toY(activeVLine.wp)-10,fill:"var(--gold)",fontSize:"11",fontWeight:"600",textAnchor:activeVLine.x>W/2?"end":"start"},`${Math.round(activeVLine.wp*100)}%`):null
       ),
-      h("div",{style:{display:"flex",justifyContent:"space-between",fontFamily:"JetBrains Mono",fontSize:".55rem",color:"var(--text-4)",marginTop:".25rem",paddingLeft:`${pad}px`,paddingRight:`${pad}px`}},
+      // Time axis labels
+      h("div",{style:{display:"flex",justifyContent:"space-between",fontFamily:"JetBrains Mono",fontSize:".55rem",color:"var(--text-4)",marginTop:".15rem",paddingLeft:`${pad}px`,paddingRight:`${pad}px`}},
         h("div",null,effectiveZoom==="Full"?"0:00":effectiveZoom==="Clutch"?"8:00 Q4":`Start ${effectiveZoom}`),
         h("div",null,effectiveZoom==="Full"?(hasOT?"END":"END"):effectiveZoom==="Clutch"?(hasOT?"OT END":"END"):`End ${effectiveZoom}`)
       ),
-      // Vertical line info bar
-      vLine&&!tooltip?h("div",{style:{background:"var(--bg-3)",border:"1px solid var(--border-1)",padding:".4rem .7rem",marginTop:".4rem",display:"flex",justifyContent:"space-between",alignItems:"center",fontFamily:"JetBrains Mono",fontSize:".7rem"},onClick:()=>setVLine(null)},
-        h("span",{style:{color:"var(--gold)"}},`${Math.round(vLine.wp*100)}% ${homeName}`),
-        h("span",{style:{color:"var(--text-2)"}},`${shortName(homeTeam)} ${vLine.homeScore}, ${shortName(awayTeam)} ${vLine.awayScore}`),
-        h("span",{style:{color:"var(--text-4)"}},"tap to dismiss")
+      // Persistent hover/pin info bar
+      h("div",{className:"wp-hover-bar",style:{marginTop:".35rem",opacity:activeVLine?1:0}},
+        activeVLine?h(Fragment,null,
+          h("span",{style:{color:"var(--gold)"}},`${Math.round((activeVLine?.wp||0)*100)}% ${homeName}`),
+          h("span",{style:{color:"var(--text-2)"}},`${shortName(homeTeam)} ${activeVLine?.homeScore||0}, ${shortName(awayTeam)} ${activeVLine?.awayScore||0}`),
+          hover&&!pinned?h("span",{style:{color:"var(--text-4)",fontSize:".6rem",maxWidth:"40%",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},hover.text||""):null,
+          pinned?h("span",{style:{color:"var(--text-4)",fontSize:".6rem"}},"click to unpin"):null
+        ):null
+      ),
+      // Scoring marker tooltip
+      scoreMarkerTip?h("div",{style:{background:"var(--bg-3)",border:"1px solid var(--border-2)",padding:".5rem .7rem",marginTop:".3rem"},onClick:()=>{setScoreMarkerTip(null);setPinned(false);setVLine(null);}},
+        h("div",{style:{fontFamily:"Oswald",fontSize:".85rem",color:"var(--text-1)",marginBottom:".15rem"}},`${scoreMarkerTip.period<=4?`Q${scoreMarkerTip.period}`:"OT"} ${scoreMarkerTip.clock} — ${scoreMarkerTip.isTD?"Touchdown":"Field Goal"}`),
+        h("div",{style:{fontSize:".8rem",color:"var(--text-2)",lineHeight:"1.4"}},scoreMarkerTip.text),
+        h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".7rem",color:"var(--gold)",marginTop:".15rem"}},`${shortName(homeTeam)} ${scoreMarkerTip.homeScore}, ${shortName(awayTeam)} ${scoreMarkerTip.awayScore}`),
+        h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".55rem",color:"var(--text-4)",marginTop:".2rem"}},"Click to dismiss")
       ):null,
-      // Dot tooltip
-      tooltip?h("div",{style:{background:"var(--bg-3)",border:"1px solid var(--border-2)",padding:".6rem .8rem",marginTop:".4rem"},onClick:()=>{setTooltip(null);setVLine(null);}},
+      // Dot overlay tooltip
+      tooltip?h("div",{style:{background:"var(--bg-3)",border:"1px solid var(--border-2)",padding:".6rem .8rem",marginTop:".3rem"},onClick:()=>{setTooltip(null);setVLine(null);setPinned(false);}},
         h("div",{style:{fontFamily:"Oswald",fontSize:".85rem",color:"var(--text-1)",marginBottom:".2rem"}},tooltip.label),
         h("div",{style:{fontSize:".8rem",color:"var(--text-2)",lineHeight:"1.5"}},tooltip.detail),
         tooltip.sub?h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".7rem",color:"var(--gold)",marginTop:".2rem"}},tooltip.sub):null,
-        h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".55rem",color:"var(--text-4)",marginTop:".3rem"}},"Tap to dismiss")
+        h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".55rem",color:"var(--text-4)",marginTop:".3rem"}},"Click to dismiss")
       ):null
     )
   );
@@ -990,6 +1087,35 @@ function CategoryModal({cat,k,onClose,g,wpStats,enrichedPlays,sumData,wpSeries})
       if(turnovers.length>=4) explanation+=`That volume of turnovers made the game feel chaotic and unpredictable — a rollercoaster for fans of both teams.`;
       else if(turnovers.length>=3) explanation+=`The turnovers kept the game from ever settling into a rhythm.`;
     }
+  } else if(k==="comeback"){
+    const cbf=wpStats?.comebackFactor||1;
+    const winnerLowest=wpStats?.minWP!=null&&wpStats?.maxWP!=null?(g.hs>g.as?wpStats.minWP:1-wpStats.maxWP):null;
+    const winnerLowestPct=winnerLowest!=null?Math.round(winnerLowest*100):null;
+    if(cbf>=8){
+      explanation=`This was a legendary comeback. ${winnerN}'s win probability dropped as low as ${winnerLowestPct}% — meaning the analytics gave them just a 1-in-${Math.round(cbf)} chance of winning at their lowest point. Clawing back from that kind of deficit is what makes sports unforgettable.`;
+    } else if(cbf>=4){
+      explanation=`${winnerN} staged a significant comeback. At their lowest point, their win probability was just ${winnerLowestPct}% — less than a 1-in-${Math.round(cbf)} chance. They overcame a substantial deficit to win this one.`;
+    } else if(cbf>=2.5){
+      explanation=`${winnerN} had to fight back from a meaningful deficit. Their WP dropped to ${winnerLowestPct}% at one point before they turned things around. Not a legendary comeback, but they earned it.`;
+    } else if(cbf>=1.5){
+      explanation=`${winnerN} trailed briefly but was never in serious danger. Their lowest WP was ${winnerLowestPct}%, which means they were always roughly in contention. A mild comeback at most.`;
+    } else {
+      explanation=`No real comeback here. ${winnerN} was in control for most or all of the game, never dropping below a ${winnerLowestPct}% win probability. The result was rarely in doubt.`;
+    }
+  } else if(k==="finish"){
+    const df=wpStats?.dramaticFinish;
+    if(df?.walkOff){
+      explanation=`This game ended with a walk-off score — the ultimate dramatic finish. The winning points came in the final seconds${df.otWinner?" of overtime":""}, giving the other team no chance to respond. These are the games fans remember forever.`;
+      if(df.margin!=null&&df.margin<=3) explanation+=` The final margin of just ${df.margin} point${df.margin>1?"s":""} underscores how close it was.`;
+    } else if(df?.goAheadFinal2Min){
+      explanation=`The go-ahead score came in the final two minutes, creating maximum tension. ${df.otWinner?"The game also required overtime to settle it. ":""}Even though the trailing team had a chance to respond, scoring that late puts enormous pressure on both sides.`;
+    } else if(df?.otWinner){
+      explanation=`This game went to overtime, which inherently adds drama — the pressure of sudden-death (or near sudden-death) football elevates every play. The winning score in OT gave this a dramatic finish bonus.`;
+    } else if(df?.finalPlayScore){
+      explanation=`A score on the final play of the game always delivers a dramatic conclusion, regardless of the margin.`;
+    } else {
+      explanation=`This game had a standard finish — the outcome was effectively decided before the final moments. No walk-off scores, no last-second heroics. The drama came earlier in the game, if at all.`;
+    }
   } else if(k==="contextR"){
     if(cat.score>=8) explanation=`${homeN} and ${awayN} have one of the NFL's deepest and fiercest rivalries. Games between these teams carry decades of history, and that intensity elevates the emotional stakes far beyond what the standings alone suggest.`;
     else if(cat.score>=6) explanation=`${homeN} and ${awayN} are bitter rivals with a long history of competitive, meaningful matchups. The familiarity between these teams adds an edge that neutral games can't match.`;
@@ -1029,7 +1155,7 @@ function CategoryModal({cat,k,onClose,g,wpStats,enrichedPlays,sumData,wpSeries})
 
 // ── Main App ──
 function App(){
-  const[t1,sT1]=useState("");const[t2,sT2]=useState("");const[ssn,sSsn]=useState("2024");const[wk,sWk]=useState("");const[st,sSt]=useState("2");
+  const[t1,sT1]=useState("");const[t2,sT2]=useState("");const[ssn,sSsn]=useState("2025");const[wk,sWk]=useState("");const[st,sSt]=useState("2");
   const[games,sGames]=useState([]);const[ldg,sLdg]=useState(false);const[prog,sProg]=useState({p:0,t:""});
   const[sort,sSort]=useState("dateDesc");
   const[det,sDet]=useState(null);const[ldD,sLdD]=useState(false);const[err,sErr]=useState(null);
@@ -1037,7 +1163,7 @@ function App(){
   const[summary,sSummary]=useState(null);const[sumData,sSumData]=useState(null);const[sumLoading,sSumLoading]=useState(false);const[selGame,sSelGame]=useState(null);
   const detRef=useRef(null);
 
-  const seasons=[];for(let y=2024;y>=1970;y--)seasons.push(""+y);
+  const seasons=[];for(let y=2025;y>=2001;y--)seasons.push(""+y);
   const weeks=[];for(let w=1;w<=18;w++)weeks.push(""+w);
 
   useEffect(()=>{if(det&&detRef.current)detRef.current.scrollIntoView({behavior:'smooth',block:'start'})},[det]);
@@ -1048,7 +1174,7 @@ function App(){
     try{
       let fetchFailures=0,fetchBatches=0;
       const res=[];let seasonsToSearch=ssn?[ssn]:[];
-      if(!ssn)for(let y=2024;y>=2015;y--)seasonsToSearch.push(""+y);
+      if(!ssn)for(let y=2025;y>=2016;y--)seasonsToSearch.push(""+y);
       const types=st?[st]:["2","3"];const allBatches=[];
       for(const season of seasonsToSearch){if(wk){for(const s of types)allBatches.push({season,w:wk,s})}else{for(const s of types){const mx=s==="3"?5:18;for(let w=1;w<=mx;w++)allBatches.push({season,w:""+w,s})}}}
       let done=0;
@@ -1096,7 +1222,7 @@ function App(){
   });
 
   return h("div",{className:"app"},
-    h("div",{className:"hdr"},h("div",{className:"hdr-tag"},"1970 \u2014 Present"),h("h1",null,"NFL Excitement Index"),h("div",{className:"sub"},"Quantifying what makes football unforgettable")),
+    h("div",{className:"hdr"},h("div",{className:"hdr-tag"},"2001 \u2014 Present"),h("h1",null,"NFL Excitement Index"),h("div",{className:"sub"},"Quantifying what makes football unforgettable")),
     !det?h(Fragment,null,
       h("div",{className:"sp"},
         h("div",{className:"sr"},
@@ -1107,7 +1233,7 @@ function App(){
             h("div",{className:"fld fld-sm"},h("label",null,"Week"),h("select",{value:wk,onChange:e=>sWk(e.target.value)},h("option",{value:""},"All"),weeks.map(w=>h("option",{key:w,value:w},`Wk ${w}`)))),
             h("div",{className:"fld fld-sm"},h("label",null,"Type"),h("select",{value:st,onChange:e=>sSt(e.target.value)},h("option",{value:"2"},"Regular"),h("option",{value:"3"},"Playoffs"),h("option",{value:""},"Both")))),
           h("button",{className:"btn btn-p",onClick:search,disabled:ldg},ldg?"...":"Search")),
-        h("div",{className:"hints"},!ssn&&t1?"Will search 2015-2024. Select a season for faster results.":"Set a team + season to see all their games.")),
+        h("div",{className:"hints"},!ssn&&t1?"Will search 2016-2025. Select a season for faster results.":"Set a team + season to see all their games.")),
       ldg?h("div",{className:"ld"},h("div",{className:"ld-r"}),h("div",{className:"ld-t"},prog.t),prog.p>0&&prog.p<100?h("div",{className:"pw"},h("div",{className:"pb"},h("div",{className:"pf",style:{width:`${prog.p}%`}}))):null):null,
       err&&!det?h("div",{style:{textAlign:"center",padding:"2rem"}},h("div",{style:{color:"var(--red)",fontFamily:"Oswald",fontSize:"1.1rem"}},"Error"),h("div",{style:{color:"var(--text-3)",fontSize:".85rem"}},err)):null,
       games.length>0&&!ldg?h("div",{className:"rl"},
@@ -1139,16 +1265,21 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
   const[wpMode,setWpMode]=useState("Leverage");
   const[wpModel,setWpModel]=useState("Both");
   const[catModal,setCatModal]=useState(null);
+  const[tab,setTab]=useState("overview"); // "overview", "stats", "analysis"
   const rushCols=["CAR","YDS","AVG","TD","LONG"];
   const recCols=["REC","YDS","AVG","TD","LONG","TGTS"];
 
+  function pfrLink(name){
+    if(!name)return"#";
+    return`https://www.pro-football-reference.com/search/search.fcgi?search=${encodeURIComponent(name)}`;
+  }
   function pTable(label,players,cols){
     if(!players||players.length===0)return null;
     const useCols=cols.filter(c=>players.some(p=>p[c]!=null&&p[c]!==""));
     return h(Fragment,null,
       h("tr",null,h("td",{className:"pst-cat",colSpan:useCols.length+1},label)),
       h("tr",null,h("th",null,"Player"),...useCols.map(c=>h("th",{key:c},c))),
-      players.map((p,i)=>h("tr",{key:i},h("td",null,p.name,h("span",{className:"tm-tag"},p.team)),...useCols.map(c=>h("td",{key:c},p[c]||"\u2014")))));
+      players.map((p,i)=>h("tr",{key:i},h("td",null,h("a",{href:pfrLink(p.name),target:"_blank",rel:"noopener noreferrer",className:"pfr-link"},p.name),h("span",{className:"tm-tag"},p.team)),...useCols.map(c=>h("td",{key:c},p[c]||"\u2014")))));
   }
 
   return h("div",{className:"dv"},
@@ -1163,49 +1294,82 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
       h("div",{className:"hero-m"},date),
       g.ven?h("div",{className:"hero-m",style:{marginTop:".15rem"}},g.ven):null,
       g.att?h("div",{className:"hero-m",style:{marginTop:".15rem"}},`Attendance: ${g.att.toLocaleString()}`):null,
+      h("a",{className:"hl-btn",href:`https://www.youtube.com/results?search_query=${encodeURIComponent(`${tn(g.at)} vs ${tn(g.ht)} ${new Date(g.date).toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'})} highlights NFL`)}`,target:"_blank",rel:"noopener noreferrer"},
+        h("svg",{viewBox:"0 0 24 24"},h("path",{d:"M23.5 6.2a3 3 0 0 0-2.1-2.1C19.5 3.5 12 3.5 12 3.5s-7.5 0-9.4.6A3 3 0 0 0 .5 6.2 31.3 31.3 0 0 0 0 12a31.3 31.3 0 0 0 .5 5.8 3 3 0 0 0 2.1 2.1c1.9.6 9.4.6 9.4.6s7.5 0 9.4-.6a3 3 0 0 0 2.1-2.1A31.3 31.3 0 0 0 24 12a31.3 31.3 0 0 0-.5-5.8zM9.6 15.6V8.4l6.3 3.6-6.3 3.6z"})),"Watch Highlights"),
       h("div",{className:"hero-e"},
         h("div",{className:"hero-el"},"Excitement Index"),
-        h("div",{className:`hero-en ${cc(og.c)}`},exc.total),
-        h("div",null,h("span",{className:`hero-eg ${cc(og.c)}`,style:{borderColor:`var(--g${og.c})`}},`${og.g} \u2014 ${og.l}`)),
-        h("div",{className:"hero-eb"},h("div",{className:`hero-ebf ${bc(og.c)}`,style:{width:`${Math.min(exc.total,100)}%`}})))),
-    box.length>0?h("div",{className:"sec an a1"},h("div",{className:"sec-h"},"Box Score"),
-      h("table",{className:"bt"},h("thead",null,h("tr",null,h("th",null,""),
-        ...(box[0]?.qs||[]).map((_,i)=>h("th",{key:i},i>=4?`OT${i>4?i-3:""}`:`Q${i+1}`)),h("th",null,"Final"))),
-        h("tbody",null,box.map((r,i)=>h("tr",{key:i,className:r.win?"win":""},h("td",null,r.team),...r.qs.map((q,qi)=>h("td",{key:qi},q==null?"\u2014":q)),h("td",{className:"fc"},r.total==null?"\u2014":r.total)))))):null,
-    stats.length>0?h("div",{className:"sec an a2"},h("div",{className:"sec-h"},"Team Statistics"),
+        h("div",{className:"radial-gauge"},
+          h("svg",{viewBox:"0 0 120 120"},
+            // Background arc
+            h("circle",{cx:60,cy:60,r:50,fill:"none",stroke:"var(--border-1)",strokeWidth:6,strokeDasharray:`${Math.PI*100}`,strokeDashoffset:0,transform:"rotate(-90 60 60)",strokeLinecap:"round"}),
+            // Colored arc (animated via CSS)
+            h("circle",{cx:60,cy:60,r:50,fill:"none",stroke:`var(--g${og.c})`,strokeWidth:6,
+              strokeDasharray:`${Math.PI*100}`,
+              strokeDashoffset:`${Math.PI*100*(1-Math.min(exc.total,100)/100)}`,
+              transform:"rotate(-90 60 60)",strokeLinecap:"round",
+              style:{transition:"stroke-dashoffset 1.5s cubic-bezier(.16,1,.3,1)"}})),
+          h("div",{className:"gauge-label"},
+            h("div",{className:`gauge-score ${cc(og.c)}`},exc.total),
+            h("div",{className:`gauge-grade ${cc(og.c)}`},`${og.g} — ${og.l}`))))),
+    // Tab navigation
+    h("div",{className:"tab-bar an a1"},
+      h("button",{className:`tab-btn${tab==="overview"?" active":""}`,onClick:()=>setTab("overview")},"Overview"),
+      h("button",{className:`tab-btn${tab==="stats"?" active":""}`,onClick:()=>setTab("stats")},"Stats"),
+      h("button",{className:`tab-btn${tab==="analysis"?" active":""}`,onClick:()=>setTab("analysis")},"Analysis")),
+    // OVERVIEW TAB
+    tab==="overview"?h(Fragment,null,
+      box.length>0?h("div",{className:"sec an a1"},h("div",{className:"sec-h"},"Box Score"),
+        h("table",{className:"bt"},h("thead",null,h("tr",null,h("th",null,""),
+          ...(box[0]?.qs||[]).map((_,i)=>h("th",{key:i},i>=4?`OT${i>4?i-3:""}`:`Q${i+1}`)),h("th",null,"Final"))),
+          h("tbody",null,box.map((r,i)=>h("tr",{key:i,className:r.win?"win":""},h("td",null,r.team),...r.qs.map((q,qi)=>h("td",{key:qi},q==null?"\u2014":q)),h("td",{className:"fc"},r.total==null?"\u2014":r.total)))))):null,
+      WPChart({seriesE:wp?.series||[],seriesAlt:wp2?.series||[],modelSel:wpModel,onModelChange:setWpModel,mode:wpMode,onModeChange:setWpMode,exc,topLev:(sumData?.enrichedPlays||sumData?.topLeveragePlays||[]),homeTeam:g.ht,awayTeam:g.at,scoringPlays:sumData?.scoringPlays||[]}),
+      h("div",{className:"sec an a5"},h("div",{className:"sec-h"},"Game Recap"),
+        h("div",{className:"wb"},sumLoading?h("p",{style:{fontStyle:"italic",color:"var(--text-3)"}},"Generating game recap..."):
+          summary?summary.map((p,i)=>h("p",{key:i},p)):h("p",{style:{color:"var(--text-3)"}},"Recap unavailable."))),
+      kp.length>0?h("div",{className:"sec an a6"},h("div",{className:"sec-h"},"Key Plays"),
+        kp.map((p,i)=>{const tl=p.tag?.toLowerCase();const[lbl,cls]=tags[tl]||[p.tag||"",""];
+          const playText=_humanizePlay(p.text)||p.text;
+          const scoreText=p.homeScore!=null&&p.awayScore!=null?` (${tn(g.ht)} ${p.homeScore}, ${tn(g.at)} ${p.awayScore})`:"";
+          return h("div",{key:i,className:"pi"},h("div",{className:"pt2"},`${p.period>=5?"OT":`Q${p.period}`} ${p.clock}`),
+            h("div",{className:"ptx"},h("span",{className:`ptg ${cls}`},lbl),playText,h("span",{style:{color:"var(--text-3)",fontSize:".8em"}},scoreText)))})):null
+    ):null,
+    // STATS TAB
+    tab==="stats"?h(Fragment,null,
+      box.length>0?h("div",{className:"sec an a1"},h("div",{className:"sec-h"},"Box Score"),
+        h("table",{className:"bt"},h("thead",null,h("tr",null,h("th",null,""),
+          ...(box[0]?.qs||[]).map((_,i)=>h("th",{key:i},i>=4?`OT${i>4?i-3:""}`:`Q${i+1}`)),h("th",null,"Final"))),
+          h("tbody",null,box.map((r,i)=>h("tr",{key:i,className:r.win?"win":""},h("td",null,r.team),...r.qs.map((q,qi)=>h("td",{key:qi},q==null?"\u2014":q)),h("td",{className:"fc"},r.total==null?"\u2014":r.total)))))):null,
+      stats.length>0?h("div",{className:"sec an a2"},h("div",{className:"sec-h"},"Team Statistics"),
       h("table",{className:"st"},h("thead",null,h("tr",null,h("th",{style:{textAlign:"right",width:"35%"}},box[0]?.team||"Away"),h("th",{style:{textAlign:"center",width:"30%"}},""),h("th",{style:{textAlign:"left",width:"35%"}},box[1]?.team||"Home"))),
         h("tbody",null,stats.map((s,i)=>h("tr",{key:i},h("td",{style:{textAlign:"right"}},s.away),h("td",{className:"sn"},s.label),h("td",{style:{textAlign:"left"}},s.home)))))):null,
     pStats&&(pStats.passing.length>0||pStats.rushing.length>0||pStats.receiving.length>0)?
       h("div",{className:"sec an a3"},h("div",{className:"sec-h"},"Player Statistics"),h("table",{className:"pst"},h("tbody",null,
-        pTable("Passing",pStats.passing,passCols),pTable("Rushing",pStats.rushing,rushCols),pTable("Receiving",pStats.receiving,recCols)))):null,
-    h("div",{className:"sec an a4"},h("div",{className:"sec-h"},"Excitement Breakdown"),
+        pTable("Passing",pStats.passing,passCols),pTable("Rushing",pStats.rushing,rushCols),pTable("Receiving",pStats.receiving,recCols)))):null
+    ):null,
+    // ANALYSIS TAB
+    tab==="analysis"?h(Fragment,null,
+      h("div",{className:"sec an a4"},h("div",{className:"sec-h"},"Excitement Breakdown"),
       h("div",{style:{fontFamily:"JetBrains Mono",fontSize:".6rem",color:"var(--text-4)",marginBottom:".4rem",marginTop:"-.4rem"}},"Tap any category for game-specific details"),
       h("div",{className:"gg"},Object.entries(exc.scores).map(([k,v])=>{const gr=gradeFor(v.score,v.max);const pct=v.score/v.max*100;
         return h("div",{key:k,className:"gc",onClick:()=>setCatModal({k,cat:v}),style:{cursor:"pointer"}},
           h("div",{className:"gi"},h("h3",null,v.name),h("div",{className:"ds"},v.desc),h("div",{className:"dt"},v.detail),h("div",{className:"br"},h("div",{className:`bf ${bc(gr.c)}`,style:{width:`${pct}%`}}))),
           h("div",{className:`gbg ${cc(gr.c)}`},h("div",null,gr.g),h("div",{className:"pt"},`${v.score}/${v.max}`)))}))),
-    WPChart({seriesE:wp?.series||[],seriesAlt:wp2?.series||[],modelSel:wpModel,onModelChange:setWpModel,mode:wpMode,onModeChange:setWpMode,exc,topLev:(sumData?.enrichedPlays||sumData?.topLeveragePlays||[]),homeTeam:g.ht,awayTeam:g.at}),
-    h("div",{className:"sec an a5"},h("div",{className:"sec-h"},"Game Recap"),
-      h("div",{className:"wb"},sumLoading?h("p",{style:{fontStyle:"italic",color:"var(--text-3)"}},"Generating game recap..."):
-        summary?summary.map((p,i)=>h("p",{key:i},p)):h("p",{style:{color:"var(--text-3)"}},"Recap unavailable."))),
-    kp.length>0?h("div",{className:"sec an a6"},h("div",{className:"sec-h"},"Key Plays"),
-      kp.map((p,i)=>{const tl=p.tag?.toLowerCase();const[lbl,cls]=tags[tl]||[p.tag||"",""];
-        const playText=_humanizePlay(p.text)||p.text;
-        const scoreText=p.homeScore!=null&&p.awayScore!=null?` (${tn(g.ht)} ${p.homeScore}, ${tn(g.at)} ${p.awayScore})`:"";
-        return h("div",{key:i,className:"pi"},h("div",{className:"pt2"},`${p.period>=5?"OT":`Q${p.period}`} ${p.clock}`),
-          h("div",{className:"ptx"},h("span",{className:`ptg ${cls}`},lbl),playText,h("span",{style:{color:"var(--text-3)",fontSize:".8em"}},scoreText)))})):null,
-    h("div",{className:"sec an a7"},
+      WPChart({seriesE:wp?.series||[],seriesAlt:wp2?.series||[],modelSel:wpModel,onModelChange:setWpModel,mode:wpMode,onModeChange:setWpMode,exc,topLev:(sumData?.enrichedPlays||sumData?.topLeveragePlays||[]),homeTeam:g.ht,awayTeam:g.at,scoringPlays:sumData?.scoringPlays||[]}),
+      h("div",{className:"sec an a7"},
       h("button",{className:"mt",onClick:()=>sMeth(!meth)},meth?"\u25be":"\u25b8"," Scoring Methodology"),
       meth?h("div",{className:"mb"},
-        h("h4",null,"How It Works"),"The Excitement Index is built on win probability (WP). We compute home-team WP for every play using an nflfastR-inspired model that incorporates score differential, game time, field position, down & distance, timeouts, and home-field advantage — with exponential time-weighting of score differential (Diff_Time_Ratio) to capture how leads become more decisive as the clock runs down. Games with volatile, uncertain, late-swinging WP curves score highest.",
-        h("h4",null,"Leverage (0\u201335)"),"Total absolute WP movement (\u03a3|\u0394WP|) across all plays, weighted toward the single largest swing. A typical NFL game totals ~1.5; classics push above 2.5.",
+        h("h4",null,"How It Works"),"The Excitement Index is built on win probability (WP). We compute home-team WP for every play using an nflfastR-inspired model that incorporates score differential, game time, field position, down & distance, timeouts, and home-field advantage — with exponential time-weighting of score differential to capture how leads become more decisive as the clock runs down. Games with volatile, uncertain, late-swinging WP curves score highest.",
+        h("h4",null,"Leverage (0\u201325)"),"Total absolute WP movement (\u03a3|\u0394WP|) across all plays, weighted toward the single largest swing. A typical NFL game totals ~1.5; classics push above 2.5.",
         h("h4",null,"Momentum (0\u201315)"),"How often the likely winner changed (WP crossing 50%) and the game shifted between advantage states (40/60% bands).",
         h("h4",null,"Clutch Time (0\u201315)"),"WP movement in the final 8 min of Q4 and all OT. Late swings carry more emotional weight.",
         h("h4",null,"In Doubt (0\u201310)"),"Percentage of the game where WP was between 20% and 80%. Longer uncertainty = more competitive feel.",
-        h("h4",null,"Chaos (0\u201310)"),"Play-to-play WP volatility, capturing turnovers, special teams, and big plays without fragile text parsing.",
+        h("h4",null,"Chaos (0\u201310)"),"Direct count of turnovers (interceptions, fumble recoveries) and special teams impact plays. Bonus points for return TDs (pick-sixes, fumble-sixes, kick/punt return TDs).",
+        h("h4",null,"Comeback Factor (0\u20135)"),"Measures how deep a hole the winning team climbed out of, using 1/(winner's lowest WP). A team that was down to 10% WP and won scores much higher than one that led wire-to-wire.",
+        h("h4",null,"Dramatic Finish (0\u20135)"),"Rewards walk-off scores, go-ahead TDs in the final 2 minutes, overtime game-winners, and scores on the literal final play. Close final margins add a bonus.",
         h("h4",null,"Context: Stakes (0\u201310)"),"Playoffs score highest (Super Bowl = 10). Regular season weighted by week + both teams' records.",
         h("h4",null,"Context: Rivalry (0\u201310)"),"Historical rivalry intensity + division familiarity. Context categories capped at 16 combined to prevent them from inflating a boring game."
-      ):null));
+      ):null)
+    ):null);
 }
 
 createRoot(document.getElementById("app")).render(h(App));
