@@ -432,20 +432,58 @@ function calcStakes(g, d){
   else if(hPct!=null&&aPct!=null&&hPct>=.50&&aPct>=.50)detail+=" (both in the mix)";
   return{score,max:10,name:"Context: Stakes",desc:"Season meaning: division races, playoff pressure",detail};
 }
+function sameConf(a,b){
+  const da=getDiv(a),db=getDiv(b);
+  if(!da||!db)return false;
+  return da.slice(0,3)===db.slice(0,3); // AFC_ or NFC_
+}
+
 function calcRivalry(g){
   let rb=rivBase(g.ht,g.at);
-  if(divRivals(g.ht,g.at)&&rb<3)rb=3;
+  const isDivRival=divRivals(g.ht,g.at);
+  if(isDivRival&&rb<3)rb=3;
+
   const hr=parseRec(g.hr),ar=parseRec(g.ar);
+  let hPct=0, aPct=0;
   if(hr&&ar){
-    const hPct=hr.w/(hr.w+hr.l+hr.t||1);
-    const aPct=ar.w/(ar.w+ar.l+ar.t||1);
-    if(hPct>=.65&&aPct>=.65)rb=Math.min(rb+2,10);
-    else if(hPct>=.55&&aPct>=.55)rb=Math.min(rb+1,10);
+    hPct=hr.w/(hr.w+hr.l+hr.t||1);
+    aPct=ar.w/(ar.w+ar.l+ar.t||1);
   }
+
+  // Recent contenders: both teams with strong records in same conference
+  // These teams likely met in recent playoffs (e.g., Eagles/Rams 2024 → 2025)
+  const bothStrong = hPct>=.55 && aPct>=.55;
+  const bothElite = hPct>=.65 && aPct>=.65;
+  const isConfMatch = sameConf(g.ht,g.at);
+
+  if(bothElite && isConfMatch && !isDivRival){
+    // Elite same-conference non-division teams: recent playoff-caliber rivals
+    rb=Math.max(rb, 5); // floor of 5 for elite conference matchups
+    rb=Math.min(rb+3, 10);
+  } else if(bothElite){
+    // Cross-conference elite teams (e.g., Super Bowl contenders)
+    rb=Math.min(rb+2, 10);
+  } else if(bothStrong && isConfMatch && !isDivRival){
+    // Strong same-conference non-division teams: emerging rivals
+    rb=Math.max(rb, 4); // floor of 4
+    rb=Math.min(rb+2, 10);
+  } else if(bothStrong){
+    rb=Math.min(rb+1, 10);
+  }
+
   if(g.season?.type===3){ rb=Math.max(rb,5); rb=Math.min(rb+1,10); }
+
   const score=clamp(rb,0,10);
-  let detail=rb>=8?"Storied rivalry":rb>=5?"Notable rivalry / high familiarity":rb>=3?"Division familiarity":"Non-rivalry";
-  return{score,max:10,name:"Context: Rivalry",desc:"History and familiarity (kept separate from leverage)",detail};
+  let detail;
+  if(rb>=8) detail="Storied rivalry";
+  else if(rb>=6 && isDivRival) detail="Division rivalry";
+  else if(rb>=5 && isConfMatch && bothElite) detail="Conference contenders — recent playoff-level matchup";
+  else if(rb>=5 && isConfMatch && bothStrong) detail="Emerging conference rivals";
+  else if(rb>=5) detail="Notable rivalry / high familiarity";
+  else if(rb>=3 && isDivRival) detail="Division familiarity";
+  else if(rb>=3 && bothStrong) detail="Competitive matchup";
+  else detail="Non-rivalry";
+  return{score,max:10,name:"Context: Rivalry",desc:"History, familiarity, and recent competitive overlap",detail};
 }
 
 // ---------- Win probability model (home team) ----------
@@ -1007,19 +1045,44 @@ function computeWPStats(series){
   const comebackFactor = winnerLowestWP > 0.001 ? (1 / winnerLowestWP) : 100;
 
   // Dramatic finish: analyze how the game ended
-  let dramaticFinish = {walkOff:false, goAheadFinal2Min:false, finalPlayScore:false, otWinner:false, margin:Math.abs(finalH-finalA)};
+  let dramaticFinish = {walkOff:false, goAheadFinal2Min:false, finalPlayScore:false, otWinner:false, gameEndingStop:false, margin:Math.abs(finalH-finalA)};
+
+  // Check if the last scoring play was a dramatic go-ahead / walk-off
   if(lastScoringPlay){
     const sp=lastScoringPlay;
     const wasGoAhead = (homeWon && sp.prevHomeScore <= sp.prevAwayScore) || (!homeWon && sp.prevAwayScore <= sp.prevHomeScore);
     const inFinal2Min = sp.period===4 && sp.remSec!=null && sp.remSec<=120;
     const inFinal30Sec = sp.period===4 && sp.remSec!=null && sp.remSec<=30;
     const isOT = sp.period>4;
-    // Walk-off: go-ahead score with no response (last scoring play of game)
     if(wasGoAhead && (inFinal30Sec || isOT)) dramaticFinish.walkOff=true;
     if(wasGoAhead && inFinal2Min) dramaticFinish.goAheadFinal2Min=true;
     if(isOT && wasGoAhead) dramaticFinish.otWinner=true;
-    // Check if this was literally the last play
     if(sp.idx >= series.length-3) dramaticFinish.finalPlayScore=true;
+  }
+
+  // Check for game-ending defensive stops on the final plays
+  // (blocked kicks, missed FGs, interceptions, failed conversions, turnover on downs)
+  const margin = Math.abs(finalH-finalA);
+  if(margin <= 8){ // Only check close games
+    // Look at the last few plays in the series for defensive stops
+    const tail = series.slice(Math.max(0, series.length-5));
+    for(const tp of tail){
+      const txt=(tp.text||"").toLowerCase();
+      const isLateGame = (tp.period===4 && tp.remSec!=null && tp.remSec<=30) || (tp.period>4);
+      if(!isLateGame) continue;
+      // Blocked kick/punt that ends the game
+      if(txt.includes("blocked")) { dramaticFinish.gameEndingStop=true; dramaticFinish.finalPlayScore=true; }
+      // Missed field goal on potential tying/winning attempt
+      else if((txt.includes("field goal") || txt.includes("extra point")) && (txt.includes("no good") || txt.includes("missed") || txt.includes("wide"))) { dramaticFinish.gameEndingStop=true; dramaticFinish.finalPlayScore=true; }
+      // Interception on final drive
+      else if(txt.includes("intercept") && tp.remSec!=null && tp.remSec<=15) { dramaticFinish.gameEndingStop=true; }
+      // Turnover on downs on final play
+      else if(txt.includes("turnover on downs")) { dramaticFinish.gameEndingStop=true; dramaticFinish.finalPlayScore=true; }
+      // Failed two-point conversion
+      else if(txt.includes("two-point") && (txt.includes("fail") || txt.includes("no good") || txt.includes("incomplete"))) { dramaticFinish.gameEndingStop=true; }
+      // Hail mary / final play incomplete pass
+      else if(tp.remSec!=null && tp.remSec<=5 && txt.includes("incomplete") && margin<=3) { dramaticFinish.gameEndingStop=true; dramaticFinish.finalPlayScore=true; }
+    }
   }
 
   return {
@@ -1089,13 +1152,13 @@ function computeExcFromWP(g,d,wpStats){
     return {
       total,
       scores:{
-        leverage:{score:0,max:25,name:"Leverage",desc:"How much win probability moved",detail:noData},
+        leverage:{score:0,max:15,name:"Leverage",desc:"How much win probability moved",detail:noData},
         swings:{score:0,max:15,name:"Momentum",desc:"How often the game flipped",detail:noData},
         clutch:{score:0,max:15,name:"Clutch Time",desc:"Late leverage and high-stakes moments",detail:noData},
         control:{score:0,max:10,name:"In Doubt",desc:"How long the outcome stayed uncertain",detail:noData},
         chaos:{score:0,max:10,name:"Chaos",desc:"Turnovers and special teams impact",detail:noData},
-        comeback:{score:0,max:5,name:"Comeback Factor",desc:"How deep a hole the winner climbed out of",detail:noData},
-        finish:{score:0,max:5,name:"Dramatic Finish",desc:"Walk-offs, go-ahead scores in final moments",detail:noData},
+        comeback:{score:0,max:10,name:"Comeback Factor",desc:"How deep a hole the winner climbed out of",detail:noData},
+        finish:{score:0,max:10,name:"Dramatic Finish",desc:"Walk-offs, go-ahead scores in final moments",detail:noData},
         contextR:ctxR,
         contextS:ctxS
       },
@@ -1103,7 +1166,7 @@ function computeExcFromWP(g,d,wpStats){
     };
   }
 
-  // --- Leverage (0-25, reduced from 35) ---
+  // --- Leverage (0-15) ---
   const lev01 = scale01(wpStats.sumAbsDelta, 0.8, 2.8);
   const peak01 = scale01(wpStats.maxAbsDelta, 0.04, 0.25);
 
@@ -1122,27 +1185,29 @@ function computeExcFromWP(g,d,wpStats){
   const toBonus = Math.min((toCounts.pickSixes * 0.15) + (toCounts.stTDs * 0.15), 0.3); // bonus for return TDs
   const chaos01 = clamp(toBase + toBonus, 0, 1);
 
-  // --- Comeback Factor (0-5, NEW) ---
+  // --- Comeback Factor (0-10) ---
   const cbf = wpStats.comebackFactor || 1;
   // CBF < 1.5 = no comeback, CBF 2 = minor, CBF 4 = significant, CBF 8+ = legendary
   const cbf01 = scale01(cbf, 1.5, 10);
 
-  // --- Dramatic Finish (0-5, NEW) ---
+  // --- Dramatic Finish (0-10) ---
   const df = wpStats.dramaticFinish || {};
   let finishPts = 0;
-  if(df.walkOff) finishPts += 2;          // Walk-off score (final 30s or OT)
-  else if(df.goAheadFinal2Min) finishPts += 1.5; // Go-ahead in final 2 min
-  if(df.otWinner) finishPts += 1;         // OT game-winner
-  if(df.finalPlayScore) finishPts += 1;   // Score on literally the final play
-  if(df.margin <= 3) finishPts += 0.5;    // Decided by a FG or less
-  const finish01 = clamp(finishPts / 5, 0, 1);
+  if(df.walkOff) finishPts += 3;            // Walk-off score (final 30s or OT)
+  else if(df.goAheadFinal2Min) finishPts += 2; // Go-ahead in final 2 min
+  if(df.otWinner) finishPts += 2;           // OT game-winner
+  if(df.finalPlayScore) finishPts += 2;     // Score/stop on literally the final play
+  if(df.gameEndingStop) finishPts += 3;     // Blocked kick, failed conversion, etc. on final play to win
+  if(df.margin <= 3) finishPts += 1;        // Decided by a FG or less
+  if(df.margin === 0 && wpStats.hasOT) finishPts += 1; // Tied at end of regulation (went to OT)
+  const finish01 = clamp(finishPts / 10, 0, 1);
 
   const ctxR = calcRivalry(g);
   const ctxS = calcStakes(g, d);
 
   const leverage = {
-    score: scoreFrom01(0.65*lev01 + 0.35*peak01, 25),
-    max:25,
+    score: scoreFrom01(0.65*lev01 + 0.35*peak01, 15),
+    max:15,
     name:"Leverage",
     desc:"Total win-probability movement (Σ|ΔWP|), with extra weight for peak moments",
     detail:`Σ|ΔWP|=${wpStats.sumAbsDelta.toFixed(2)}, max |ΔWP|=${wpStats.maxAbsDelta.toFixed(2)}`
@@ -1176,18 +1241,19 @@ function computeExcFromWP(g,d,wpStats){
     detail:`${toCounts.turnovers} turnovers${toCounts.pickSixes?`, ${toCounts.pickSixes} pick-six${toCounts.pickSixes>1?"es":""}`:""}, ${toCounts.stTDs} ST TDs`
   };
   const comeback = {
-    score: scoreFrom01(cbf01, 5),
-    max:5,
+    score: scoreFrom01(cbf01, 10),
+    max:10,
     name:"Comeback Factor",
     desc:"How deep a hole the winner climbed out of (1/winner's lowest WP)",
     detail:`Winner's lowest WP=${Math.round((wpStats.minWP<0.5?(wpStats.minWP):(1-wpStats.maxWP))*100)}%, CBF=${cbf.toFixed(1)}`
   };
   const finish = {
-    score: scoreFrom01(finish01, 5),
-    max:5,
+    score: scoreFrom01(finish01, 10),
+    max:10,
     name:"Dramatic Finish",
-    desc:"Walk-off scores, go-ahead TDs in the final moments, overtime winners",
+    desc:"Walk-off scores, game-ending stops, go-ahead TDs in the final moments, overtime winners",
     detail:[
+      df.gameEndingStop?"Game-ending defensive stop":null,
       df.walkOff?"Walk-off score":df.goAheadFinal2Min?"Go-ahead in final 2:00":null,
       df.otWinner?"OT game-winner":null,
       df.finalPlayScore?"Final-play score":null,
@@ -1196,7 +1262,7 @@ function computeExcFromWP(g,d,wpStats){
   };
 
   const coreTotal = leverage.score + swings.score + clutch.score + control.score + chaos.score + comeback.score + finish.score;
-  const ctxTotal  = clamp(ctxR.score + ctxS.score, 0, 16);
+  const ctxTotal  = clamp(ctxR.score + ctxS.score, 0, 15);
   const total = clamp(coreTotal + ctxTotal, 0, 100);
 
   return {
