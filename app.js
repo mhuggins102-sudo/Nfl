@@ -1104,7 +1104,11 @@ function CategoryModal({cat,k,onClose,g,wpStats,enrichedPlays,sumData,wpSeries})
     }
   } else if(k==="finish"){
     const df=wpStats?.dramaticFinish;
-    if(df?.walkOff){
+    if(df?.gameEndingStop){
+      explanation=`This game ended with a dramatic defensive stop — a blocked kick, missed field goal, interception, or turnover on downs on the final play. The winning team's defense had to make one last play to seal the victory, and the outcome hung in the balance until the very end.`;
+      if(df.walkOff) explanation+=` Combined with a walk-off score, this was an all-time dramatic finish.`;
+      if(df.margin!=null&&df.margin<=3) explanation+=` The final margin of just ${df.margin} point${df.margin>1?"s":""} underscores how close it was.`;
+    } else if(df?.walkOff){
       explanation=`This game ended with a walk-off score — the ultimate dramatic finish. The winning points came in the final seconds${df.otWinner?" of overtime":""}, giving the other team no chance to respond. These are the games fans remember forever.`;
       if(df.margin!=null&&df.margin<=3) explanation+=` The final margin of just ${df.margin} point${df.margin>1?"s":""} underscores how close it was.`;
     } else if(df?.goAheadFinal2Min){
@@ -1112,13 +1116,17 @@ function CategoryModal({cat,k,onClose,g,wpStats,enrichedPlays,sumData,wpSeries})
     } else if(df?.otWinner){
       explanation=`This game went to overtime, which inherently adds drama — the pressure of sudden-death (or near sudden-death) football elevates every play. The winning score in OT gave this a dramatic finish bonus.`;
     } else if(df?.finalPlayScore){
-      explanation=`A score on the final play of the game always delivers a dramatic conclusion, regardless of the margin.`;
+      explanation=`A score or game-deciding play on the final play of the game always delivers a dramatic conclusion, regardless of the margin.`;
     } else {
       explanation=`This game had a standard finish — the outcome was effectively decided before the final moments. No walk-off scores, no last-second heroics. The drama came earlier in the game, if at all.`;
     }
   } else if(k==="contextR"){
+    const detailLower=(cat.detail||"").toLowerCase();
+    const isConfContenders=detailLower.includes("conference contenders")||detailLower.includes("emerging conference");
     if(cat.score>=8) explanation=`${homeN} and ${awayN} have one of the NFL's deepest and fiercest rivalries. Games between these teams carry decades of history, and that intensity elevates the emotional stakes far beyond what the standings alone suggest.`;
+    else if(cat.score>=6 && isConfContenders) explanation=`${homeN} and ${awayN} are both elite teams in the same conference. When two powerhouses keep meeting in the regular season and playoffs, a rivalry forms fast — even without decades of history. This matchup has recent playoff-level intensity.`;
     else if(cat.score>=6) explanation=`${homeN} and ${awayN} are bitter rivals with a long history of competitive, meaningful matchups. The familiarity between these teams adds an edge that neutral games can't match.`;
+    else if(cat.score>=5 && isConfContenders) explanation=`${homeN} and ${awayN} are both strong teams in the same conference, creating a natural competitive overlap. Recent high-stakes matchups between these teams have elevated this from a random game to a budding rivalry.`;
     else if(cat.score>=4){
       const sameDiv = (sumData?.homeDivision && sumData?.awayDivision && sumData.homeDivision===sumData.awayDivision);
       explanation = sameDiv
@@ -1294,7 +1302,7 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
       h("div",{className:"hero-m"},date),
       g.ven?h("div",{className:"hero-m",style:{marginTop:".15rem"}},g.ven):null,
       g.att?h("div",{className:"hero-m",style:{marginTop:".15rem"}},`Attendance: ${g.att.toLocaleString()}`):null,
-      h("a",{className:"hl-btn",href:`https://www.youtube.com/results?search_query=${encodeURIComponent(`${tn(g.at)} vs ${tn(g.ht)} ${new Date(g.date).toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'})} highlights NFL`)}`,target:"_blank",rel:"noopener noreferrer"},
+      h("a",{className:"hl-btn",href:`https://www.youtube.com/results?search_query=${encodeURIComponent(`${tn(g.at)} vs ${tn(g.ht)} ${g.season?.year||new Date(g.date).getFullYear()} week ${g.week?.number||""} highlights NFL`)}`,target:"_blank",rel:"noopener noreferrer"},
         h("svg",{viewBox:"0 0 24 24"},h("path",{d:"M23.5 6.2a3 3 0 0 0-2.1-2.1C19.5 3.5 12 3.5 12 3.5s-7.5 0-9.4.6A3 3 0 0 0 .5 6.2 31.3 31.3 0 0 0 0 12a31.3 31.3 0 0 0 .5 5.8 3 3 0 0 0 2.1 2.1c1.9.6 9.4.6 9.4.6s7.5 0 9.4-.6a3 3 0 0 0 2.1-2.1A31.3 31.3 0 0 0 24 12a31.3 31.3 0 0 0-.5-5.8zM9.6 15.6V8.4l6.3 3.6-6.3 3.6z"})),"Watch Highlights"),
       h("div",{className:"hero-e"},
         h("div",{className:"hero-el"},"Excitement Index"),
@@ -1340,11 +1348,11 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
           ...(box[0]?.qs||[]).map((_,i)=>h("th",{key:i},i>=4?`OT${i>4?i-3:""}`:`Q${i+1}`)),h("th",null,"Final"))),
           h("tbody",null,box.map((r,i)=>h("tr",{key:i,className:r.win?"win":""},h("td",null,r.team),...r.qs.map((q,qi)=>h("td",{key:qi},q==null?"\u2014":q)),h("td",{className:"fc"},r.total==null?"\u2014":r.total)))))):null,
       stats.length>0?h("div",{className:"sec an a2"},h("div",{className:"sec-h"},"Team Statistics"),
-      h("table",{className:"st"},h("thead",null,h("tr",null,h("th",{style:{textAlign:"right",width:"35%"}},box[0]?.team||"Away"),h("th",{style:{textAlign:"center",width:"30%"}},""),h("th",{style:{textAlign:"left",width:"35%"}},box[1]?.team||"Home"))),
-        h("tbody",null,stats.map((s,i)=>h("tr",{key:i},h("td",{style:{textAlign:"right"}},s.away),h("td",{className:"sn"},s.label),h("td",{style:{textAlign:"left"}},s.home)))))):null,
-    pStats&&(pStats.passing.length>0||pStats.rushing.length>0||pStats.receiving.length>0)?
-      h("div",{className:"sec an a3"},h("div",{className:"sec-h"},"Player Statistics"),h("table",{className:"pst"},h("tbody",null,
-        pTable("Passing",pStats.passing,passCols),pTable("Rushing",pStats.rushing,rushCols),pTable("Receiving",pStats.receiving,recCols)))):null
+        h("table",{className:"st"},h("thead",null,h("tr",null,h("th",{style:{textAlign:"right",width:"35%"}},box[0]?.team||"Away"),h("th",{style:{textAlign:"center",width:"30%"}},""),h("th",{style:{textAlign:"left",width:"35%"}},box[1]?.team||"Home"))),
+          h("tbody",null,stats.map((s,i)=>h("tr",{key:i},h("td",{style:{textAlign:"right"}},s.away),h("td",{className:"sn"},s.label),h("td",{style:{textAlign:"left"}},s.home)))))):null,
+      (pStats&&(pStats.passing.length>0||pStats.rushing.length>0||pStats.receiving.length>0))?
+        h("div",{className:"sec an a3"},h("div",{className:"sec-h"},"Player Statistics"),h("table",{className:"pst"},h("tbody",null,
+          pTable("Passing",pStats.passing,passCols),pTable("Rushing",pStats.rushing,rushCols),pTable("Receiving",pStats.receiving,recCols)))):null
     ):null,
     // ANALYSIS TAB
     tab==="analysis"?h(Fragment,null,
@@ -1365,9 +1373,9 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
         h("h4",null,"In Doubt (0\u201310)"),"Percentage of the game where WP was between 20% and 80%. Longer uncertainty = more competitive feel.",
         h("h4",null,"Chaos (0\u201310)"),"Direct count of turnovers (interceptions, fumble recoveries) and special teams impact plays. Bonus points for return TDs (pick-sixes, fumble-sixes, kick/punt return TDs).",
         h("h4",null,"Comeback Factor (0\u20135)"),"Measures how deep a hole the winning team climbed out of, using 1/(winner's lowest WP). A team that was down to 10% WP and won scores much higher than one that led wire-to-wire.",
-        h("h4",null,"Dramatic Finish (0\u20135)"),"Rewards walk-off scores, go-ahead TDs in the final 2 minutes, overtime game-winners, and scores on the literal final play. Close final margins add a bonus.",
+        h("h4",null,"Dramatic Finish (0\u20135)"),"Rewards walk-off scores, game-ending defensive stops (blocked kicks, failed conversions), go-ahead TDs in the final 2 minutes, overtime game-winners, and scores on the literal final play. Close final margins add a bonus.",
         h("h4",null,"Context: Stakes (0\u201310)"),"Playoffs score highest (Super Bowl = 10). Regular season weighted by week + both teams' records.",
-        h("h4",null,"Context: Rivalry (0\u201310)"),"Historical rivalry intensity + division familiarity. Context categories capped at 16 combined to prevent them from inflating a boring game."
+        h("h4",null,"Context: Rivalry (0\u201310)"),"Historical rivalry intensity + division familiarity. Context categories capped at 15 combined to prevent them from inflating a boring game."
       ):null)
     ):null);
 }
