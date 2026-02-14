@@ -1120,31 +1120,35 @@ function CategoryModal({cat,k,onClose,g,wpStats,enrichedPlays,sumData,wpSeries})
     } else {
       explanation=`This game had a standard finish — the outcome was effectively decided before the final moments. No walk-off scores, no last-second heroics. The drama came earlier in the game, if at all.`;
     }
-  } else if(k==="contextR"){
+  } else if(k==="context"){
+    const riv=cat._rivalry||{};
+    const stk=cat._stakes||{};
     const detailLower=(cat.detail||"").toLowerCase();
     const isConfContenders=detailLower.includes("conference contenders")||detailLower.includes("emerging conference");
-    if(cat.score>=8) explanation=`${homeN} and ${awayN} have one of the NFL's deepest and fiercest rivalries. Games between these teams carry decades of history, and that intensity elevates the emotional stakes far beyond what the standings alone suggest.`;
-    else if(cat.score>=6 && isConfContenders) explanation=`${homeN} and ${awayN} are both elite teams in the same conference. When two powerhouses keep meeting in the regular season and playoffs, a rivalry forms fast — even without decades of history. This matchup has recent playoff-level intensity.`;
-    else if(cat.score>=6) explanation=`${homeN} and ${awayN} are bitter rivals with a long history of competitive, meaningful matchups. The familiarity between these teams adds an edge that neutral games can't match.`;
-    else if(cat.score>=5 && isConfContenders) explanation=`${homeN} and ${awayN} are both strong teams in the same conference, creating a natural competitive overlap. Recent high-stakes matchups between these teams have elevated this from a random game to a budding rivalry.`;
-    else if(cat.score>=4){
-      const sameDiv = (sumData?.homeDivision && sumData?.awayDivision && sumData.homeDivision===sumData.awayDivision);
-      explanation = sameDiv
-        ? `${homeN} and ${awayN} are division rivals who play each other twice a year. That familiarity breeds contempt — and usually better football.`
-        : `${homeN} and ${awayN} are familiar opponents with some rivalry history, adding an extra edge to the matchup.`;
-    } else if(cat.score>=2) {
-      explanation=`A modest rivalry. These teams have some history, but it doesn't carry the same intensity as the league's premier matchups.`;
-    } else {
-      explanation=`Not a significant rivalry. These teams don't have notable history, so the drama here came purely from the game itself.`;
-    }
-  } else if(k==="contextS"){
-    const detail=cat.detail||"";
-    if(cat.score>=9) explanation=`The highest possible stakes. ${detail.includes("Super Bowl")?"The Super Bowl — the biggest single game in American sports. Every play matters more because there's no next week.":detail.includes("Championship")?"A conference championship with a Super Bowl berth on the line. The pressure is immense.":"A win-or-go-home playoff game with maximum stakes."}`;
-    else if(cat.score>=7) explanation=`Major playoff stakes. ${detail.includes("Divisional")?"A divisional round game where every possession carries enormous weight.":detail.includes("Wild")?"A Wild Card game where one mistake can end a team's season.":"The playoff atmosphere elevates every moment."}`;
-    else if(cat.score>=5) explanation=`This game carried real standings implications. ${detail.includes("both in the mix")?"Both teams were in the thick of the playoff race, making this a de facto elimination game.":"The result had meaningful consequences beyond the win-loss column."}`;
-    else if(cat.score>=3) explanation=`Some standings implications, but not a must-win for either team. The result matters for seeding and positioning, though the pressure level is moderate.`;
-    else if(detail.includes("resting")) explanation=`Reduced stakes. ${detail.split("·").pop()?.trim()||"At least one team appeared to be resting key players."} That context limits the game's competitive significance and explains the lower score here.`;
-    else explanation=`Not a high-stakes matchup on paper. Early-season games or matchups between struggling teams don't carry the same weight. The drama had to come from the field.`;
+    const rivScore=riv.score||0;
+    const stkScore=stk.score||0;
+    const stkDetail=stk.detail||"";
+    // Stakes explanation
+    let stakesExpl="";
+    if(stkScore>=9) stakesExpl=stkDetail.includes("Super Bowl")?"The Super Bowl — the biggest single game in American sports. Every play matters more because there's no next week.":stkDetail.includes("Championship")?"A conference championship with a Super Bowl berth on the line. The pressure is immense.":"A win-or-go-home playoff game with maximum stakes.";
+    else if(stkScore>=7) stakesExpl=stkDetail.includes("Divisional")?"A divisional round game where every possession carries enormous weight.":stkDetail.includes("Wild")?"A Wild Card game where one mistake can end a team's season.":"The playoff atmosphere elevates every moment.";
+    else if(stkScore>=5) stakesExpl=stkDetail.includes("both in the mix")?"Both teams were in the thick of the playoff race, making this a de facto elimination game.":"This game carried real standings implications.";
+    else if(stkScore>=3) stakesExpl="Some standings implications, with the result mattering for seeding and positioning.";
+    else if(stkDetail.includes("resting")) stakesExpl=`Reduced stakes — ${stkDetail.split("·").pop()?.trim()||"at least one team appeared to be resting key players."}`;
+    else stakesExpl="Not a high-stakes matchup on paper.";
+    // Rivalry explanation
+    let rivExpl="";
+    const hardcoded=riv._hardcoded||0;
+    if(hardcoded>=8) rivExpl=`${homeN} and ${awayN} have one of the NFL's deepest and fiercest rivalries — decades of history elevate the emotional stakes.`;
+    else if(hardcoded>=6) rivExpl=`${homeN} and ${awayN} are longtime rivals with a strong history of competitive matchups.`;
+    else if(isConfContenders && rivScore>=6) rivExpl=`${homeN} and ${awayN} are both elite teams competing for the same conference path this season. Even without decades of history, recent playoff-caliber matchups have created a real rivalry — one rooted in this era, not the record books.`;
+    else if(isConfContenders && rivScore>=5) rivExpl=`${homeN} and ${awayN} are both strong teams in the same conference this season, creating natural competitive overlap. This is a budding rivalry born from recent results, not historical tradition.`;
+    else if(rivScore>=4){
+      const sameDiv=(sumData?.homeDivision&&sumData?.awayDivision&&sumData.homeDivision===sumData.awayDivision);
+      rivExpl=sameDiv?`${homeN} and ${awayN} are division rivals who play each other twice a year. That familiarity breeds contempt.`:`${homeN} and ${awayN} are familiar opponents with some rivalry history.`;
+    } else if(rivScore>=2) rivExpl="A modest rivalry — these teams have some history but nothing deeply personal.";
+    else rivExpl="Not a significant rivalry. The drama came purely from the game itself.";
+    explanation=`${stakesExpl} ${rivExpl}`;
   }
 
   return h("div",{style:{position:"fixed",inset:0,background:"rgba(7,9,13,.85)",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center",padding:"1rem"},onClick:onClose},
@@ -1283,11 +1287,14 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
   }
   function pTable(label,players,cols){
     if(!players||players.length===0)return null;
-    const useCols=cols.filter(c=>players.some(p=>p[c]!=null&&p[c]!==""));
-    return h(Fragment,null,
-      h("tr",null,h("td",{className:"pst-cat",colSpan:useCols.length+1},label)),
-      h("tr",null,h("th",null,"Player"),...useCols.map(c=>h("th",{key:c},c))),
-      players.map((p,i)=>h("tr",{key:i},h("td",null,h("a",{href:pfrLink(p.name),target:"_blank",rel:"noopener noreferrer",className:"pfr-link"},p.name),h("span",{className:"tm-tag"},p.team)),...useCols.map(c=>h("td",{key:c},p[c]||"\u2014")))));
+    try{
+      const useCols=(cols||[]).filter(c=>players.some(p=>p[c]!=null&&p[c]!==""));
+      if(useCols.length===0)return null;
+      return h(Fragment,null,
+        h("tr",null,h("td",{className:"pst-cat",colSpan:useCols.length+1},label)),
+        h("tr",null,h("th",null,"Player"),useCols.map(c=>h("th",{key:c},c))),
+        players.map((p,i)=>h("tr",{key:`${label}-${i}`},h("td",null,h("a",{href:pfrLink(p.name),target:"_blank",rel:"noopener noreferrer",className:"pfr-link"},p.name||"Unknown"),h("span",{className:"tm-tag"},p.team||"")),useCols.map(c=>h("td",{key:c},p[c]||"\u2014")))));
+    }catch(e){return null;}
   }
 
   return h("div",{className:"dv"},
@@ -1343,14 +1350,14 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
     ):null,
     // STATS TAB
     tab==="stats"?h(Fragment,null,
-      box.length>0?h("div",{className:"sec an a1"},h("div",{className:"sec-h"},"Box Score"),
+      (box&&box.length>0)?h("div",{className:"sec an a1"},h("div",{className:"sec-h"},"Box Score"),
         h("table",{className:"bt"},h("thead",null,h("tr",null,h("th",null,""),
           ...(box[0]?.qs||[]).map((_,i)=>h("th",{key:i},i>=4?`OT${i>4?i-3:""}`:`Q${i+1}`)),h("th",null,"Final"))),
-          h("tbody",null,box.map((r,i)=>h("tr",{key:i,className:r.win?"win":""},h("td",null,r.team),...r.qs.map((q,qi)=>h("td",{key:qi},q==null?"\u2014":q)),h("td",{className:"fc"},r.total==null?"\u2014":r.total)))))):null,
-      stats.length>0?h("div",{className:"sec an a2"},h("div",{className:"sec-h"},"Team Statistics"),
+          h("tbody",null,box.map((r,i)=>h("tr",{key:i,className:r.win?"win":""},h("td",null,r.team),...(r.qs||[]).map((q,qi)=>h("td",{key:qi},q==null?"\u2014":q)),h("td",{className:"fc"},r.total==null?"\u2014":r.total)))))):null,
+      (stats&&stats.length>0)?h("div",{className:"sec an a2"},h("div",{className:"sec-h"},"Team Statistics"),
         h("table",{className:"st"},h("thead",null,h("tr",null,h("th",{style:{textAlign:"right",width:"35%"}},box[0]?.team||"Away"),h("th",{style:{textAlign:"center",width:"30%"}},""),h("th",{style:{textAlign:"left",width:"35%"}},box[1]?.team||"Home"))),
           h("tbody",null,stats.map((s,i)=>h("tr",{key:i},h("td",{style:{textAlign:"right"}},s.away),h("td",{className:"sn"},s.label),h("td",{style:{textAlign:"left"}},s.home)))))):null,
-      (pStats&&(pStats.passing.length>0||pStats.rushing.length>0||pStats.receiving.length>0))?
+      (pStats&&pStats.passing&&pStats.rushing&&pStats.receiving&&(pStats.passing.length>0||pStats.rushing.length>0||pStats.receiving.length>0))?
         h("div",{className:"sec an a3"},h("div",{className:"sec-h"},"Player Statistics"),h("table",{className:"pst"},h("tbody",null,
           pTable("Passing",pStats.passing,passCols),pTable("Rushing",pStats.rushing,rushCols),pTable("Receiving",pStats.receiving,recCols)))):null
     ):null,
@@ -1367,15 +1374,14 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
       h("button",{className:"mt",onClick:()=>sMeth(!meth)},meth?"\u25be":"\u25b8"," Scoring Methodology"),
       meth?h("div",{className:"mb"},
         h("h4",null,"How It Works"),"The Excitement Index is built on win probability (WP). We compute home-team WP for every play using an nflfastR-inspired model that incorporates score differential, game time, field position, down & distance, timeouts, and home-field advantage — with exponential time-weighting of score differential to capture how leads become more decisive as the clock runs down. Games with volatile, uncertain, late-swinging WP curves score highest.",
-        h("h4",null,"Leverage (0\u201325)"),"Total absolute WP movement (\u03a3|\u0394WP|) across all plays, weighted toward the single largest swing. A typical NFL game totals ~1.5; classics push above 2.5.",
+        h("h4",null,"Leverage (0\u201315)"),"Total absolute WP movement (\u03a3|\u0394WP|) across all plays, weighted toward the single largest swing. A typical NFL game totals ~1.5; classics push above 2.5.",
         h("h4",null,"Momentum (0\u201315)"),"How often the likely winner changed (WP crossing 50%) and the game shifted between advantage states (40/60% bands).",
         h("h4",null,"Clutch Time (0\u201315)"),"WP movement in the final 8 min of Q4 and all OT. Late swings carry more emotional weight.",
         h("h4",null,"In Doubt (0\u201310)"),"Percentage of the game where WP was between 20% and 80%. Longer uncertainty = more competitive feel.",
         h("h4",null,"Chaos (0\u201310)"),"Direct count of turnovers (interceptions, fumble recoveries) and special teams impact plays. Bonus points for return TDs (pick-sixes, fumble-sixes, kick/punt return TDs).",
-        h("h4",null,"Comeback Factor (0\u20135)"),"Measures how deep a hole the winning team climbed out of, using 1/(winner's lowest WP). A team that was down to 10% WP and won scores much higher than one that led wire-to-wire.",
-        h("h4",null,"Dramatic Finish (0\u20135)"),"Rewards walk-off scores, game-ending defensive stops (blocked kicks, failed conversions), go-ahead TDs in the final 2 minutes, overtime game-winners, and scores on the literal final play. Close final margins add a bonus.",
-        h("h4",null,"Context: Stakes (0\u201310)"),"Playoffs score highest (Super Bowl = 10). Regular season weighted by week + both teams' records.",
-        h("h4",null,"Context: Rivalry (0\u201310)"),"Historical rivalry intensity + division familiarity. Context categories capped at 15 combined to prevent them from inflating a boring game."
+        h("h4",null,"Comeback Factor (0\u201310)"),"Measures how deep a hole the winning team climbed out of, using 1/(winner's lowest WP). A team that was down to 10% WP and won scores much higher than one that led wire-to-wire.",
+        h("h4",null,"Dramatic Finish (0\u201310)"),"Rewards walk-off scores, game-ending defensive stops (blocked kicks, failed conversions, turnover on downs), go-ahead TDs in the final 2 minutes, overtime game-winners, and scores on the literal final play. One-score margins add a bonus. Walk-offs and game-ending stops are weighted heavily — a defensive stop on the final play of a close game scores 9\u201310.",
+        h("h4",null,"Context: Rivalry & Stakes (0\u201315)"),"Combines playoff importance (Super Bowl = highest) with rivalry intensity. Rivalry accounts for both long-standing historical matchups (e.g. Packers/Bears) and current-era competitive overlap (e.g. two elite conference teams meeting in a big game this season). Capped at 15 to prevent context from inflating a boring game."
       ):null)
     ):null);
 }

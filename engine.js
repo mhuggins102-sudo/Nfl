@@ -255,6 +255,7 @@ export function buildPlayerStats(d){
   }
   function objFromLabels(labels,stats){
     const o={};
+    if(!labels)return o;
     for(let i=0;i<labels.length;i++)o[labels[i]]=stats?.[i]??"";
     return o;
   }
@@ -439,7 +440,8 @@ function sameConf(a,b){
 }
 
 function calcRivalry(g){
-  let rb=rivBase(g.ht,g.at);
+  const hardcoded=rivBase(g.ht,g.at);
+  let rb=hardcoded;
   const isDivRival=divRivals(g.ht,g.at);
   if(isDivRival&&rb<3)rb=3;
 
@@ -451,22 +453,25 @@ function calcRivalry(g){
   }
 
   // Recent contenders: both teams with strong records in same conference
-  // These teams likely met in recent playoffs (e.g., Eagles/Rams 2024 → 2025)
+  // Rivalry is era-dependent — two teams may be fierce rivals one decade and
+  // irrelevant to each other the next. We use current-season records as a proxy
+  // for whether these teams are in each other's orbit RIGHT NOW.
   const bothStrong = hPct>=.55 && aPct>=.55;
   const bothElite = hPct>=.65 && aPct>=.65;
   const isConfMatch = sameConf(g.ht,g.at);
+  let boostSource=null; // track where the score came from
 
   if(bothElite && isConfMatch && !isDivRival){
-    // Elite same-conference non-division teams: recent playoff-caliber rivals
-    rb=Math.max(rb, 5); // floor of 5 for elite conference matchups
+    rb=Math.max(rb, 5);
     rb=Math.min(rb+3, 10);
+    if(hardcoded<6) boostSource="confElite";
   } else if(bothElite){
-    // Cross-conference elite teams (e.g., Super Bowl contenders)
     rb=Math.min(rb+2, 10);
+    if(hardcoded<6) boostSource="crossElite";
   } else if(bothStrong && isConfMatch && !isDivRival){
-    // Strong same-conference non-division teams: emerging rivals
-    rb=Math.max(rb, 4); // floor of 4
+    rb=Math.max(rb, 4);
     rb=Math.min(rb+2, 10);
+    if(hardcoded<5) boostSource="confStrong";
   } else if(bothStrong){
     rb=Math.min(rb+1, 10);
   }
@@ -474,16 +479,20 @@ function calcRivalry(g){
   if(g.season?.type===3){ rb=Math.max(rb,5); rb=Math.min(rb+1,10); }
 
   const score=clamp(rb,0,10);
+  // Detail label reflects the SOURCE of the rivalry — hardcoded history vs. current-era context
   let detail;
-  if(rb>=8) detail="Storied rivalry";
-  else if(rb>=6 && isDivRival) detail="Division rivalry";
-  else if(rb>=5 && isConfMatch && bothElite) detail="Conference contenders — recent playoff-level matchup";
-  else if(rb>=5 && isConfMatch && bothStrong) detail="Emerging conference rivals";
+  if(hardcoded>=8) detail="Storied rivalry";
+  else if(hardcoded>=6 && isDivRival) detail="Division rivalry";
+  else if(hardcoded>=6) detail="Historic rivalry";
+  else if(boostSource==="confElite") detail="Conference contenders — both elite teams competing for the same playoff path this season";
+  else if(boostSource==="crossElite") detail="Cross-conference showdown — both among the league's best this season";
+  else if(boostSource==="confStrong") detail="Emerging conference rivals — both strong teams in the same conference this season";
+  else if(rb>=5 && isDivRival) detail="Division rivalry";
   else if(rb>=5) detail="Notable rivalry / high familiarity";
   else if(rb>=3 && isDivRival) detail="Division familiarity";
   else if(rb>=3 && bothStrong) detail="Competitive matchup";
   else detail="Non-rivalry";
-  return{score,max:10,name:"Context: Rivalry",desc:"History, familiarity, and recent competitive overlap",detail};
+  return{score,max:10,name:"Context: Rivalry",desc:"History, familiarity, and recent competitive overlap",detail,_boostSource:boostSource,_hardcoded:hardcoded};
 }
 
 // ---------- Win probability model (home team) ----------
@@ -1148,9 +1157,9 @@ function computeExcFromWP(g,d,wpStats){
   if(!wpStats){
     const ctxR=calcRivalry(g);
     const ctxS=calcStakes(g, d);
-    const total=ctxR.score+ctxS.score;
+    const ctxScore=clamp(ctxR.score+ctxS.score,0,15);
     return {
-      total,
+      total:ctxScore,
       scores:{
         leverage:{score:0,max:15,name:"Leverage",desc:"How much win probability moved",detail:noData},
         swings:{score:0,max:15,name:"Momentum",desc:"How often the game flipped",detail:noData},
@@ -1159,8 +1168,7 @@ function computeExcFromWP(g,d,wpStats){
         chaos:{score:0,max:10,name:"Chaos",desc:"Turnovers and special teams impact",detail:noData},
         comeback:{score:0,max:10,name:"Comeback Factor",desc:"How deep a hole the winner climbed out of",detail:noData},
         finish:{score:0,max:10,name:"Dramatic Finish",desc:"Walk-offs, go-ahead scores in final moments",detail:noData},
-        contextR:ctxR,
-        contextS:ctxS
+        context:{score:ctxScore,max:15,name:"Context: Rivalry & Stakes",desc:"Season meaning, playoff pressure, rivalry history",detail:[ctxS.detail,ctxR.detail].filter(Boolean).join(" · "),_rivalry:ctxR,_stakes:ctxS}
       },
       wp: null
     };
@@ -1191,19 +1199,35 @@ function computeExcFromWP(g,d,wpStats){
   const cbf01 = scale01(cbf, 1.5, 10);
 
   // --- Dramatic Finish (0-10) ---
+  // Reweighted: a game-ending defensive stop or walk-off in a close game
+  // should score 9-10/10, not 5/10. Normalize to 7 so dramatic finishes
+  // saturate the scale properly.
   const df = wpStats.dramaticFinish || {};
   let finishPts = 0;
-  if(df.walkOff) finishPts += 3;            // Walk-off score (final 30s or OT)
-  else if(df.goAheadFinal2Min) finishPts += 2; // Go-ahead in final 2 min
-  if(df.otWinner) finishPts += 2;           // OT game-winner
-  if(df.finalPlayScore) finishPts += 2;     // Score/stop on literally the final play
-  if(df.gameEndingStop) finishPts += 3;     // Blocked kick, failed conversion, etc. on final play to win
-  if(df.margin <= 3) finishPts += 1;        // Decided by a FG or less
+  if(df.walkOff) finishPts += 4;               // Walk-off score (final 30s or OT) — peak drama
+  else if(df.goAheadFinal2Min) finishPts += 3;  // Go-ahead in final 2 min
+  if(df.otWinner) finishPts += 2;              // OT game-winner
+  if(df.finalPlayScore) finishPts += 2;        // Score/stop on literally the final play
+  if(df.gameEndingStop) finishPts += 3.5;      // Blocked kick, INT, turnover on downs on final drive
+  if(df.margin != null && df.margin <= 3) finishPts += 1.5;  // Decided by a FG or less
+  else if(df.margin != null && df.margin <= 8) finishPts += 0.5; // One-score game
   if(df.margin === 0 && wpStats.hasOT) finishPts += 1; // Tied at end of regulation (went to OT)
-  const finish01 = clamp(finishPts / 10, 0, 1);
+  const finish01 = clamp(finishPts / 7, 0, 1);
 
   const ctxR = calcRivalry(g);
   const ctxS = calcStakes(g, d);
+  // Combined context score (capped at 15)
+  const ctxCombinedScore = clamp(ctxR.score + ctxS.score, 0, 15);
+  const ctxCombinedDetail = [ctxS.detail, ctxR.detail].filter(Boolean).join(" · ");
+  const context = {
+    score: ctxCombinedScore,
+    max: 15,
+    name: "Context: Rivalry & Stakes",
+    desc: "Season meaning, playoff pressure, rivalry history, and competitive overlap",
+    detail: ctxCombinedDetail,
+    _rivalry: ctxR,
+    _stakes: ctxS
+  };
 
   const leverage = {
     score: scoreFrom01(0.65*lev01 + 0.35*peak01, 15),
@@ -1262,12 +1286,11 @@ function computeExcFromWP(g,d,wpStats){
   };
 
   const coreTotal = leverage.score + swings.score + clutch.score + control.score + chaos.score + comeback.score + finish.score;
-  const ctxTotal  = clamp(ctxR.score + ctxS.score, 0, 15);
-  const total = clamp(coreTotal + ctxTotal, 0, 100);
+  const total = clamp(coreTotal + context.score, 0, 100);
 
   return {
     total,
-    scores:{leverage,swings,clutch,control,chaos,comeback,finish,contextR:ctxR,contextS:ctxS},
+    scores:{leverage,swings,clutch,control,chaos,comeback,finish,context},
     wp: wpStats
   };
 }
@@ -1492,8 +1515,8 @@ export function buildSummaryData(g,d,exc){
     if(winner==="away" && diff>0) maxWinnerDeficit=Math.max(maxWinnerDeficit, diff);
   }
 
-  const ctxR = exc?.scores?.contextR;
-  const ctxS = exc?.scores?.contextS;
+  const ctxR = exc?.scores?.context?._rivalry || exc?.scores?.contextR;
+  const ctxS = exc?.scores?.context?._stakes || exc?.scores?.contextS;
 
   const rivalryNote = inferRivalryNote(ctxR);
   const stakesNote  = inferStakesNote(ctxS);
@@ -1566,7 +1589,7 @@ export function buildSummaryData(g,d,exc){
   }
 
   // Context stakes detail from engine
-  const stakesDetail=exc?.scores?.contextS?.detail||"";
+  const stakesDetail=exc?.scores?.context?._stakes?.detail||exc?.scores?.contextS?.detail||"";
 
   return{
     matchup:`${tn(g.at)} at ${tn(g.ht)}`,
