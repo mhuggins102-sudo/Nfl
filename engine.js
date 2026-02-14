@@ -932,6 +932,16 @@ function computeWPStats(series){
   const band=x=>x<0.4?-1:(x>0.6?1:0);
   let prevBand=band(prev);
 
+  // Track min WP for each side (for comeback factor)
+  let minWP=series[0].wp, maxWP=series[0].wp;
+
+  // Track turnovers and special teams plays directly
+  let turnovers=0, stPlays=0, pickSixes=0, fumbleTDs=0, returnTDs=0;
+
+  // Track final scoring plays for dramatic finish detection
+  let lastScoringPlay=null;
+  let prevScore={h:series[0].homeScore||0, a:series[0].awayScore||0};
+
   for(let i=1;i<series.length;i++){
     const cur=series[i].wp;
     const d=series[i].delta;
@@ -939,6 +949,9 @@ function computeWPStats(series){
     sumAbs+=a;
     sumSq+=a*a;
     maxAbs=Math.max(maxAbs,a);
+
+    minWP=Math.min(minWP,cur);
+    maxWP=Math.max(maxWP,cur);
 
     if((prev<0.5 && cur>=0.5) || (prev>0.5 && cur<=0.5)) crosses50++;
 
@@ -956,11 +969,58 @@ function computeWPStats(series){
       lateMax=Math.max(lateMax,a);
     }
 
+    // Count turnovers and special teams directly from tags
+    const tag=series[i].tag;
+    const lo=(series[i].text||"").toLowerCase();
+    if(tag==="TO") turnovers++;
+    if(tag==="SP") stPlays++;
+    // Detect pick-sixes, fumble-return TDs, kick/punt return TDs
+    if(tag==="TO" && lo.includes("touchdown")) pickSixes++;
+    if(lo.includes("fumble") && lo.includes("touchdown") && tag==="TO") fumbleTDs++;
+    if((lo.includes("kickoff")||lo.includes("punt")) && lo.includes("touchdown") && !lo.includes("no play")) returnTDs++;
+
+    // Track scoring changes for dramatic finish
+    const curH=series[i].homeScore||0, curA=series[i].awayScore||0;
+    if(curH!==prevScore.h || curA!==prevScore.a){
+      lastScoringPlay={period:per, remSec:rem, homeScore:curH, awayScore:curA,
+        prevHomeScore:prevScore.h, prevAwayScore:prevScore.a, text:series[i].text||"",
+        wp:cur, tag, idx:i};
+      prevScore={h:curH, a:curA};
+    }
+
     prev=cur;
   }
 
   const volatility=Math.sqrt(sumSq/Math.max(1,series.length-1));
   const doubtFrac=inDoubt/Math.max(1,series.length);
+
+  // Determine if game ended in OT
+  const hasOT=series.some(s=>s.period>4);
+  // Final score
+  const lastPlay=series[series.length-1];
+  const finalH=lastPlay.homeScore||0, finalA=lastPlay.awayScore||0;
+  const homeWon=finalH>finalA;
+
+  // Comeback factor: 1 / (winner's lowest WP during the game)
+  // If home won, winner's lowest = minWP. If away won, winner's lowest = 1 - maxWP.
+  const winnerLowestWP = homeWon ? minWP : (1 - maxWP);
+  const comebackFactor = winnerLowestWP > 0.001 ? (1 / winnerLowestWP) : 100;
+
+  // Dramatic finish: analyze how the game ended
+  let dramaticFinish = {walkOff:false, goAheadFinal2Min:false, finalPlayScore:false, otWinner:false, margin:Math.abs(finalH-finalA)};
+  if(lastScoringPlay){
+    const sp=lastScoringPlay;
+    const wasGoAhead = (homeWon && sp.prevHomeScore <= sp.prevAwayScore) || (!homeWon && sp.prevAwayScore <= sp.prevHomeScore);
+    const inFinal2Min = sp.period===4 && sp.remSec!=null && sp.remSec<=120;
+    const inFinal30Sec = sp.period===4 && sp.remSec!=null && sp.remSec<=30;
+    const isOT = sp.period>4;
+    // Walk-off: go-ahead score with no response (last scoring play of game)
+    if(wasGoAhead && (inFinal30Sec || isOT)) dramaticFinish.walkOff=true;
+    if(wasGoAhead && inFinal2Min) dramaticFinish.goAheadFinal2Min=true;
+    if(isOT && wasGoAhead) dramaticFinish.otWinner=true;
+    // Check if this was literally the last play
+    if(sp.idx >= series.length-3) dramaticFinish.finalPlayScore=true;
+  }
 
   return {
     sumAbsDelta:sumAbs,
@@ -970,7 +1030,13 @@ function computeWPStats(series){
     crosses4060,
     lateSumAbsDelta:lateAbs,
     lateMaxAbsDelta:lateMax,
-    doubtFrac
+    doubtFrac,
+    // New fields
+    minWP, maxWP,
+    comebackFactor,
+    turnovers, stPlays, pickSixes, fumbleTDs, returnTDs,
+    dramaticFinish,
+    hasOT
   };
 }
 
@@ -981,7 +1047,41 @@ function scale01(x,lo,hi){
 }
 function scoreFrom01(frac,max){ return Math.round(clamp(frac,0,1)*max); }
 
+function countTurnoversFromPlays(d){
+  // Direct turnover/ST counting from play-by-play for Chaos category
+  const plays=getAllPlays(d);
+  const id2abbr=teamIdToAbbrMap(d);
+  let turnovers=0, stTDs=0, pickSixes=0;
+  for(const p of plays){
+    const txt=(p.text||p.shortText||"").toLowerCase();
+    const ty=(p.type?.text||"").toLowerCase();
+    if(ty.includes("timeout")||ty.includes("two-minute")||ty==="end period") continue;
+    // Interceptions
+    if(txt.includes("intercept")||ty.includes("interception")){
+      turnovers++;
+      if(txt.includes("touchdown")) pickSixes++;
+    }
+    // Fumbles recovered by opponent
+    else if(txt.includes("fumble")){
+      const driveAbbr=(p._driveTeamId!=null)?id2abbr.get(String(p._driveTeamId)):null;
+      const recMatch=txt.match(/recovered\s+by\s+([a-z]{2,4})[\s-]/i);
+      const recTeam=recMatch?recMatch[1].toUpperCase():null;
+      const offTeam=(driveAbbr||p.team?.abbreviation||"").toUpperCase();
+      if(recTeam&&offTeam&&recTeam!==offTeam){
+        turnovers++;
+        if(txt.includes("touchdown")) pickSixes++;
+      }
+    }
+    else if(ty.includes("turnover on downs")) turnovers++;
+    // Special teams TDs
+    if((txt.includes("kickoff")||txt.includes("punt return"))&&txt.includes("touchdown")&&!txt.includes("no play")) stTDs++;
+    if(txt.includes("blocked")&&txt.includes("touchdown")) stTDs++;
+  }
+  return {turnovers, stTDs, pickSixes};
+}
+
 function computeExcFromWP(g,d,wpStats){
+  const noData="Insufficient play-by-play";
   if(!wpStats){
     const ctxR=calcRivalry(g);
     const ctxS=calcStakes(g, d);
@@ -989,11 +1089,13 @@ function computeExcFromWP(g,d,wpStats){
     return {
       total,
       scores:{
-        leverage:{score:0,max:35,name:"Leverage",desc:"How much win probability moved",detail:"Insufficient play-by-play"},
-        swings:{score:0,max:15,name:"Momentum",desc:"How often the game flipped",detail:"Insufficient play-by-play"},
-        clutch:{score:0,max:15,name:"Clutch Time",desc:"Late leverage and high-stakes moments",detail:"Insufficient play-by-play"},
-        control:{score:0,max:10,name:"In Doubt",desc:"How long the outcome stayed uncertain",detail:"Insufficient play-by-play"},
-        chaos:{score:0,max:10,name:"Chaos",desc:"Turnovers/special teams that actually swung WP",detail:"Insufficient play-by-play"},
+        leverage:{score:0,max:25,name:"Leverage",desc:"How much win probability moved",detail:noData},
+        swings:{score:0,max:15,name:"Momentum",desc:"How often the game flipped",detail:noData},
+        clutch:{score:0,max:15,name:"Clutch Time",desc:"Late leverage and high-stakes moments",detail:noData},
+        control:{score:0,max:10,name:"In Doubt",desc:"How long the outcome stayed uncertain",detail:noData},
+        chaos:{score:0,max:10,name:"Chaos",desc:"Turnovers and special teams impact",detail:noData},
+        comeback:{score:0,max:5,name:"Comeback Factor",desc:"How deep a hole the winner climbed out of",detail:noData},
+        finish:{score:0,max:5,name:"Dramatic Finish",desc:"Walk-offs, go-ahead scores in final moments",detail:noData},
         contextR:ctxR,
         contextS:ctxS
       },
@@ -1001,26 +1103,48 @@ function computeExcFromWP(g,d,wpStats){
     };
   }
 
+  // --- Leverage (0-25, reduced from 35) ---
   const lev01 = scale01(wpStats.sumAbsDelta, 0.8, 2.8);
   const peak01 = scale01(wpStats.maxAbsDelta, 0.04, 0.25);
-  const vol01  = scale01(wpStats.volatility, 0.02, 0.10);
 
+  // --- Momentum (0-15, unchanged) ---
   const swing01 = scale01(wpStats.crosses50 + 1.5*wpStats.crosses4060, 1, 10);
 
+  // --- Clutch Time (0-15, unchanged) ---
   const clutch01 = scale01(wpStats.lateSumAbsDelta + 2.0*wpStats.lateMaxAbsDelta, 0.15, 1.10);
 
+  // --- In Doubt (0-10, unchanged) ---
   const doubt01 = scale01(wpStats.doubtFrac, 0.25, 0.85);
 
-  const chaos01 = clamp(0.55*peak01 + 0.45*vol01, 0, 1);
+  // --- Chaos (0-10, now direct turnover/ST counting) ---
+  const toCounts = countTurnoversFromPlays(d);
+  const toBase = scale01(toCounts.turnovers, 0, 5); // 0 TOs = 0, 5+ TOs = max
+  const toBonus = Math.min((toCounts.pickSixes * 0.15) + (toCounts.stTDs * 0.15), 0.3); // bonus for return TDs
+  const chaos01 = clamp(toBase + toBonus, 0, 1);
+
+  // --- Comeback Factor (0-5, NEW) ---
+  const cbf = wpStats.comebackFactor || 1;
+  // CBF < 1.5 = no comeback, CBF 2 = minor, CBF 4 = significant, CBF 8+ = legendary
+  const cbf01 = scale01(cbf, 1.5, 10);
+
+  // --- Dramatic Finish (0-5, NEW) ---
+  const df = wpStats.dramaticFinish || {};
+  let finishPts = 0;
+  if(df.walkOff) finishPts += 2;          // Walk-off score (final 30s or OT)
+  else if(df.goAheadFinal2Min) finishPts += 1.5; // Go-ahead in final 2 min
+  if(df.otWinner) finishPts += 1;         // OT game-winner
+  if(df.finalPlayScore) finishPts += 1;   // Score on literally the final play
+  if(df.margin <= 3) finishPts += 0.5;    // Decided by a FG or less
+  const finish01 = clamp(finishPts / 5, 0, 1);
 
   const ctxR = calcRivalry(g);
   const ctxS = calcStakes(g, d);
 
   const leverage = {
-    score: scoreFrom01(0.65*lev01 + 0.35*peak01, 35),
-    max:35,
+    score: scoreFrom01(0.65*lev01 + 0.35*peak01, 25),
+    max:25,
     name:"Leverage",
-    desc:"Total win-probability movement (|ΔWP|), with extra weight for peak moments",
+    desc:"Total win-probability movement (Σ|ΔWP|), with extra weight for peak moments",
     detail:`Σ|ΔWP|=${wpStats.sumAbsDelta.toFixed(2)}, max |ΔWP|=${wpStats.maxAbsDelta.toFixed(2)}`
   };
   const swings = {
@@ -1028,13 +1152,13 @@ function computeExcFromWP(g,d,wpStats){
     max:15,
     name:"Momentum",
     desc:"How often the likely winner changed and the game swung between advantage states",
-    detail:`50% crossings=${wpStats.crosses50}, 40/60 crossings=${wpStats.crosses4060}`
+    detail:`50% crossings=${wpStats.crosses50}, 40/60 band crossings=${wpStats.crosses4060}`
   };
   const clutch = {
     score: scoreFrom01(clutch01, 15),
     max:15,
     name:"Clutch Time",
-    desc:"Late leverage (final 8:00 of 4Q + OT), where changes are most meaningful",
+    desc:"WP movement in the final 8:00 of Q4 + OT — late swings carry the most emotional weight",
     detail:`Late Σ|ΔWP|=${wpStats.lateSumAbsDelta.toFixed(2)}, late peak=${wpStats.lateMaxAbsDelta.toFixed(2)}`
   };
   const control = {
@@ -1048,17 +1172,36 @@ function computeExcFromWP(g,d,wpStats){
     score: scoreFrom01(chaos01, 10),
     max:10,
     name:"Chaos",
-    desc:"Turnovers/special teams style volatility (proxied by peak+volatility)",
-    detail:`Volatility=${wpStats.volatility.toFixed(3)}`
+    desc:"Turnovers and special teams impact — interceptions, fumbles, return TDs",
+    detail:`${toCounts.turnovers} turnovers${toCounts.pickSixes?`, ${toCounts.pickSixes} pick-six${toCounts.pickSixes>1?"es":""}`:""}, ${toCounts.stTDs} ST TDs`
+  };
+  const comeback = {
+    score: scoreFrom01(cbf01, 5),
+    max:5,
+    name:"Comeback Factor",
+    desc:"How deep a hole the winner climbed out of (1/winner's lowest WP)",
+    detail:`Winner's lowest WP=${Math.round((wpStats.minWP<0.5?(wpStats.minWP):(1-wpStats.maxWP))*100)}%, CBF=${cbf.toFixed(1)}`
+  };
+  const finish = {
+    score: scoreFrom01(finish01, 5),
+    max:5,
+    name:"Dramatic Finish",
+    desc:"Walk-off scores, go-ahead TDs in the final moments, overtime winners",
+    detail:[
+      df.walkOff?"Walk-off score":df.goAheadFinal2Min?"Go-ahead in final 2:00":null,
+      df.otWinner?"OT game-winner":null,
+      df.finalPlayScore?"Final-play score":null,
+      df.margin!=null?`Final margin: ${df.margin} pts`:null
+    ].filter(Boolean).join(", ")||"Standard finish"
   };
 
-  const coreTotal = leverage.score + swings.score + clutch.score + control.score + chaos.score;
+  const coreTotal = leverage.score + swings.score + clutch.score + control.score + chaos.score + comeback.score + finish.score;
   const ctxTotal  = clamp(ctxR.score + ctxS.score, 0, 16);
   const total = clamp(coreTotal + ctxTotal, 0, 100);
 
   return {
     total,
-    scores:{leverage,swings,clutch,control,chaos,contextR:ctxR,contextS:ctxS},
+    scores:{leverage,swings,clutch,control,chaos,comeback,finish,contextR:ctxR,contextS:ctxS},
     wp: wpStats
   };
 }
