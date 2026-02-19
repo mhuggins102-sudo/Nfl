@@ -1,4 +1,4 @@
-import{createElement as h,useState,useCallback,useEffect,useRef,Fragment}from"https://esm.sh/react@18.2.0";
+import{createElement as h,useState,useCallback,useEffect,useRef,Fragment,Component}from"https://esm.sh/react@18.2.0";
 import{createRoot}from"https://esm.sh/react-dom@18.2.0/client";
 import{TEAMS,tn,TK,espnSB,espnSum,parseEv,computeExc,oGrade,gradeFor,extractKP,buildBox,buildStats,buildPlayerStats,buildSummaryData,getAllPlays,getWPSeries,getWPSeriesPlus}from"./engine.js";
 
@@ -1269,34 +1269,158 @@ function App(){
     h("div",{className:"ftr"},"NFL Game Excitement Index \u00b7 Play-by-play data from ESPN"));
 }
 
+// ── Error Boundary — catches render errors in children ──
+class Catch extends Component{
+  constructor(p){super(p);this.state={err:null};}
+  static getDerivedStateFromError(e){return{err:e};}
+  componentDidCatch(err,info){console.error("Stats render error:",err,info?.componentStack);}
+  render(){
+    if(this.state.err) return h("div",{style:{padding:"2rem",textAlign:"center",background:"var(--bg-1)",borderRadius:".5rem",margin:"1rem 0"}},
+      h("div",{style:{color:"#f66",fontFamily:"Oswald",fontSize:"1.1rem",marginBottom:".75rem"}},"Stats Render Error"),
+      h("div",{style:{color:"var(--text-2)",fontFamily:"JetBrains Mono",fontSize:".8rem",lineHeight:1.6,whiteSpace:"pre-wrap"}},String(this.state.err?.message||this.state.err||"Something went wrong")));
+    return this.props.children;
+  }
+}
+
+// ── Stats Tab (isolated component so errors don't blank the page) ──
+function StatsTab({box,stats,pStats}){
+  try{
+  const passCols=["C/ATT","YDS","AVG","TD","INT","QBR"];
+  const rushCols=["CAR","YDS","AVG","TD","LONG"];
+  const recCols=["REC","YDS","AVG","TD","LONG","TGTS"];
+
+  function pfrLink(name){return name?`https://www.pro-football-reference.com/search/search.fcgi?search=${encodeURIComponent(name)}`:"#";}
+  function pTable(label,players,cols){
+    if(!players||!players.length)return null;
+    const useCols=(cols||[]).filter(c=>players.some(p=>p[c]!=null&&p[c]!==""));
+    if(!useCols.length)return null;
+    const headerCells=[h("th",{key:"_p"},"Player")];
+    for(const c of useCols) headerCells.push(h("th",{key:c},c));
+    const rows=[
+      h("tr",{key:`${label}-cat`},h("td",{className:"pst-cat",colSpan:useCols.length+1},label)),
+      h("tr",{key:`${label}-hdr`},headerCells)
+    ];
+    for(let i=0;i<players.length;i++){
+      const p=players[i];
+      const cells=[h("td",{key:"_n"},h("a",{href:pfrLink(p.name),target:"_blank",rel:"noopener noreferrer",className:"pfr-link"},p.name||"Unknown"),h("span",{className:"tm-tag"},p.team||""))];
+      for(const c of useCols) cells.push(h("td",{key:c},p[c]||"\u2014"));
+      rows.push(h("tr",{key:`${label}-${i}`},cells));
+    }
+    return rows;
+  }
+
+  const sections=[];
+
+  // Box Score
+  if(box&&box.length>0&&box.some(r=>r.team)){
+    const headerCells=[h("th",{key:"_b"},"")];
+    const qs=box[0]?.qs||[];
+    for(let i=0;i<qs.length;i++) headerCells.push(h("th",{key:`q${i}`},i>=4?`OT${i>4?i-3:""}`:`Q${i+1}`));
+    headerCells.push(h("th",{key:"_f"},"Final"));
+    const bodyRows=[];
+    for(let ri=0;ri<box.length;ri++){
+      const r=box[ri];
+      const cells=[h("td",{key:"_t"},r.team)];
+      const rqs=r.qs||[];
+      for(let qi=0;qi<rqs.length;qi++) cells.push(h("td",{key:`q${qi}`},rqs[qi]==null?"\u2014":rqs[qi]));
+      cells.push(h("td",{key:"_f",className:"fc"},r.total==null?"\u2014":r.total));
+      bodyRows.push(h("tr",{key:`br${ri}`,className:r.win?"win":""},cells));
+    }
+    sections.push(h("div",{key:"box",className:"sec"},h("div",{className:"sec-h"},"Box Score"),
+      h("table",{className:"bt"},h("thead",null,h("tr",null,headerCells)),h("tbody",null,bodyRows))));
+  }
+
+  // Team Statistics
+  if(stats&&stats.length>0){
+    const bodyRows=[];
+    for(let i=0;i<stats.length;i++){
+      const s=stats[i];
+      bodyRows.push(h("tr",{key:`ts${i}`},h("td",{style:{textAlign:"right"}},s.away),h("td",{className:"sn"},s.label),h("td",{style:{textAlign:"left"}},s.home)));
+    }
+    sections.push(h("div",{key:"team",className:"sec"},h("div",{className:"sec-h"},"Team Statistics"),
+      h("table",{className:"st"},
+        h("thead",null,h("tr",null,h("th",{style:{textAlign:"right",width:"35%"}},box?.[0]?.team||"Away"),h("th",{style:{textAlign:"center",width:"30%"}},""),h("th",{style:{textAlign:"left",width:"35%"}},box?.[1]?.team||"Home"))),
+        h("tbody",null,bodyRows))));
+  }
+
+  // Player Statistics
+  if(pStats){
+    const allRows=[];
+    const passing=pTable("Passing",pStats.passing,passCols);
+    const rushing=pTable("Rushing",pStats.rushing,rushCols);
+    const receiving=pTable("Receiving",pStats.receiving,recCols);
+    if(passing){for(const r of passing)allRows.push(r);}
+    if(rushing){for(const r of rushing)allRows.push(r);}
+    if(receiving){for(const r of receiving)allRows.push(r);}
+    if(allRows.length>0){
+      sections.push(h("div",{key:"player",className:"sec"},h("div",{className:"sec-h"},"Player Statistics"),
+        h("table",{className:"pst"},h("tbody",null,allRows))));
+    }
+  }
+
+  if(sections.length===0) return h("div",{style:{padding:"2rem",textAlign:"center",color:"var(--text-3)",fontFamily:"JetBrains Mono",fontSize:".85rem",background:"var(--bg-1)",borderRadius:".5rem",margin:"1rem 0"}},"No detailed stats available for this game.");
+  return h("div",null,sections);
+  }catch(e){
+    console.error("StatsTab error:",e);
+    return h("div",{style:{padding:"2rem",textAlign:"center",background:"var(--bg-1)",borderRadius:".5rem",margin:"1rem 0"}},
+      h("div",{style:{color:"#f66",fontFamily:"Oswald",fontSize:"1.1rem",marginBottom:".75rem"}},"Stats Error"),
+      h("div",{style:{color:"var(--text-2)",fontFamily:"JetBrains Mono",fontSize:".8rem",lineHeight:1.6}},String(e?.message||e)));
+  }
+}
+
+// ── Video Popup — searches YouTube and embeds first result ──
+function VideoPopup({query,onClose}){
+  const[videoId,setVideoId]=useState(null);
+  const[loading,setLoading]=useState(true);
+  const[error,setError]=useState(null);
+
+  useEffect(()=>{
+    let cancelled=false;
+    setLoading(true);setError(null);setVideoId(null);
+    fetch(`/api/youtube?q=${encodeURIComponent(query)}`)
+      .then(r=>r.json())
+      .then(data=>{
+        if(cancelled)return;
+        if(data.videoId) setVideoId(data.videoId);
+        else setError("No highlights found");
+        setLoading(false);
+      })
+      .catch(()=>{
+        if(!cancelled){setError("Failed to search YouTube");setLoading(false);}
+      });
+    return ()=>{cancelled=true;};
+  },[query]);
+
+  const searchUrl=`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+
+  return h("div",{className:"vid-overlay",onClick:onClose},
+    h("div",{className:"vid-modal",onClick:e=>e.stopPropagation()},
+      h("button",{className:"vid-close",onClick:onClose},"\u2715"),
+      loading?h("div",{style:{aspectRatio:"16/9",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--bg-1)",color:"var(--text-3)",fontFamily:"JetBrains Mono",fontSize:".8rem"}},"Searching YouTube..."):
+      error?h("div",{style:{aspectRatio:"16/9",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"var(--bg-1)",gap:".5rem"}},
+        h("div",{style:{color:"var(--text-3)",fontFamily:"JetBrains Mono",fontSize:".8rem"}},error),
+        h("a",{href:searchUrl,target:"_blank",rel:"noopener noreferrer",style:{color:"var(--gold)",fontFamily:"Oswald",fontSize:".9rem",textDecoration:"none"}},"Search on YouTube \u2192")):
+      h("iframe",{
+        src:`https://www.youtube.com/embed/${videoId}?autoplay=1&rel=0`,
+        className:"vid-frame",
+        allow:"autoplay; encrypted-media; picture-in-picture; fullscreen",
+        allowFullScreen:true,
+        frameBorder:"0"
+      }),
+      h("a",{className:"vid-fallback",href:videoId?`https://www.youtube.com/watch?v=${videoId}`:searchUrl,target:"_blank",rel:"noopener noreferrer"},videoId?"Open on YouTube \u2192":"Search on YouTube \u2192")
+    )
+  );
+}
+
 function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
   const{exc,kp,box,stats,pStats,wp,wp2}=d;const og=oGrade(exc.total);
   const date=new Date(g.date).toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
   const tags={td:["TD","t-td"],fg:["FG","t-cl"],to:["TURNOVER","t-to"],bg:["BIG PLAY","t-bg"],cl:["CLUTCH","t-cl"],sp:["SPECIAL","t-sp"],"4d":["4TH DOWN","t-bg"]};
-  const passCols=["C/ATT","YDS","AVG","TD","INT","QBR"];
   const[wpMode,setWpMode]=useState("Leverage");
   const[wpModel,setWpModel]=useState("Both");
   const[catModal,setCatModal]=useState(null);
   const[tab,setTab]=useState("overview"); // "overview", "stats", "analysis"
   const[showVideo,setShowVideo]=useState(false);
-  const rushCols=["CAR","YDS","AVG","TD","LONG"];
-  const recCols=["REC","YDS","AVG","TD","LONG","TGTS"];
-
-  function pfrLink(name){
-    if(!name)return"#";
-    return`https://www.pro-football-reference.com/search/search.fcgi?search=${encodeURIComponent(name)}`;
-  }
-  function pTable(label,players,cols){
-    if(!players||players.length===0)return null;
-    try{
-      const useCols=(cols||[]).filter(c=>players.some(p=>p[c]!=null&&p[c]!==""));
-      if(useCols.length===0)return null;
-      return h(Fragment,null,
-        h("tr",null,h("td",{className:"pst-cat",colSpan:useCols.length+1},label)),
-        h("tr",null,h("th",null,"Player"),useCols.map(c=>h("th",{key:c},c))),
-        players.map((p,i)=>h("tr",{key:`${label}-${i}`},h("td",null,h("a",{href:pfrLink(p.name),target:"_blank",rel:"noopener noreferrer",className:"pfr-link"},p.name||"Unknown"),h("span",{className:"tm-tag"},p.team||"")),useCols.map(c=>h("td",{key:c},p[c]||"\u2014")))));
-    }catch(e){return null;}
-  }
 
   return h("div",{className:"dv"},
     catModal?h(CategoryModal,{cat:catModal.cat,k:catModal.k,onClose:()=>setCatModal(null),g,wpStats:exc.wp,enrichedPlays:sumData?.enrichedPlays||[],sumData,wpSeries:d.wp?.series||[]}):null,
@@ -1328,19 +1452,10 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
             h("div",{className:`gauge-score ${cc(og.c)}`},exc.total),
             h("div",{className:`gauge-grade ${cc(og.c)}`},`${og.g} — ${og.l}`))))),
     // Video popup modal
-    showVideo?h("div",{className:"vid-overlay",onClick:()=>setShowVideo(false)},
-      h("div",{className:"vid-modal",onClick:e=>e.stopPropagation()},
-        h("button",{className:"vid-close",onClick:()=>setShowVideo(false)},"\u2715"),
-        h("iframe",{
-          src:`https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(`${tn(g.at)} vs ${tn(g.ht)} ${g.season?.year||new Date(g.date).getFullYear()} week ${g.week?.number||""} highlights NFL`)}&autoplay=1`,
-          className:"vid-frame",
-          allow:"autoplay; encrypted-media; picture-in-picture; fullscreen",
-          allowFullScreen:true,
-          frameBorder:"0"
-        }),
-        h("a",{className:"vid-fallback",href:`https://www.youtube.com/results?search_query=${encodeURIComponent(`${tn(g.at)} vs ${tn(g.ht)} ${g.season?.year||new Date(g.date).getFullYear()} week ${g.week?.number||""} highlights NFL`)}`,target:"_blank",rel:"noopener noreferrer"},"Open on YouTube \u2192")
-      )
-    ):null,
+    showVideo?h(VideoPopup,{
+      query:`${tn(g.at)} vs ${tn(g.ht)} ${g.season?.year||new Date(g.date).getFullYear()} week ${g.week?.number||""} highlights NFL`,
+      onClose:()=>setShowVideo(false)
+    }):null,
     // Tab navigation
     h("div",{className:"tab-bar an a1"},
       h("button",{className:`tab-btn${tab==="overview"?" active":""}`,onClick:()=>setTab("overview")},"Overview"),
@@ -1364,62 +1479,7 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
             h("div",{className:"ptx"},h("span",{className:`ptg ${cls}`},lbl),playText,h("span",{style:{color:"var(--text-3)",fontSize:".8em"}},scoreText)))})):null
     ):null,
     // STATS TAB
-    tab==="stats"?(()=>{
-      try{
-        const secs=[];
-        // Box Score
-        if(box&&box.length>0){
-          const qHeaders=[h("th",{key:"blank"},"")];
-          const qs=box[0]?.qs||[];
-          for(let i=0;i<qs.length;i++) qHeaders.push(h("th",{key:`q${i}`},i>=4?`OT${i>4?i-3:""}`:`Q${i+1}`));
-          qHeaders.push(h("th",{key:"fin"},"Final"));
-          const rows=box.map((r,ri)=>{
-            const cells=[h("td",{key:"tm"},r.team)];
-            for(let qi=0;qi<(r.qs||[]).length;qi++) cells.push(h("td",{key:`q${qi}`},(r.qs||[])[qi]==null?"\u2014":(r.qs||[])[qi]));
-            cells.push(h("td",{key:"tot",className:"fc"},r.total==null?"\u2014":r.total));
-            return h("tr",{key:`box${ri}`,className:r.win?"win":""},cells);
-          });
-          secs.push(h("div",{key:"boxscore",className:"sec an a1"},h("div",{className:"sec-h"},"Box Score"),
-            h("table",{className:"bt"},h("thead",null,h("tr",null,qHeaders)),h("tbody",null,rows))));
-        }
-        // Team Statistics
-        if(stats&&stats.length>0){
-          const tRows=stats.map((s,i)=>h("tr",{key:`ts${i}`},
-            h("td",{style:{textAlign:"right"}},s.away),
-            h("td",{className:"sn"},s.label),
-            h("td",{style:{textAlign:"left"}},s.home)));
-          secs.push(h("div",{key:"teamstats",className:"sec an a2"},h("div",{className:"sec-h"},"Team Statistics"),
-            h("table",{className:"st"},
-              h("thead",null,h("tr",null,
-                h("th",{style:{textAlign:"right",width:"35%"}},box[0]?.team||"Away"),
-                h("th",{style:{textAlign:"center",width:"30%"}},""),
-                h("th",{style:{textAlign:"left",width:"35%"}},box[1]?.team||"Home"))),
-              h("tbody",null,tRows))));
-        }
-        // Player Statistics
-        if(pStats){
-          const hasPassing=(pStats.passing||[]).length>0;
-          const hasRushing=(pStats.rushing||[]).length>0;
-          const hasReceiving=(pStats.receiving||[]).length>0;
-          if(hasPassing||hasRushing||hasReceiving){
-            const ptbody=[];
-            if(hasPassing){const pt=pTable("Passing",pStats.passing,passCols);if(pt)ptbody.push(pt);}
-            if(hasRushing){const pt=pTable("Rushing",pStats.rushing,rushCols);if(pt)ptbody.push(pt);}
-            if(hasReceiving){const pt=pTable("Receiving",pStats.receiving,recCols);if(pt)ptbody.push(pt);}
-            if(ptbody.length>0){
-              secs.push(h("div",{key:"playerstats",className:"sec an a3"},h("div",{className:"sec-h"},"Player Statistics"),
-                h("table",{className:"pst"},h("tbody",null,ptbody))));
-            }
-          }
-        }
-        if(secs.length===0) return h("div",{className:"sec",style:{padding:"2rem",textAlign:"center",color:"var(--text-3)",fontFamily:"JetBrains Mono",fontSize:".75rem"}},"No stats available for this game.");
-        return h(Fragment,null,secs);
-      }catch(e){
-        return h("div",{className:"sec",style:{padding:"2rem",textAlign:"center"}},
-          h("div",{style:{color:"var(--red)",fontFamily:"Oswald",fontSize:"1rem",marginBottom:".5rem"}},"Stats Error"),
-          h("div",{style:{color:"var(--text-3)",fontFamily:"JetBrains Mono",fontSize:".75rem"}},e.message||"Failed to render stats"));
-      }
-    })():null,
+    tab==="stats"?h(Catch,null,h(StatsTab,{box,stats,pStats})):null,
     // ANALYSIS TAB
     tab==="analysis"?h(Fragment,null,
       h("div",{className:"sec an a4"},h("div",{className:"sec-h"},"Excitement Breakdown"),
