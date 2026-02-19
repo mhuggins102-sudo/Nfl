@@ -1278,6 +1278,7 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
   const[wpModel,setWpModel]=useState("Both");
   const[catModal,setCatModal]=useState(null);
   const[tab,setTab]=useState("overview"); // "overview", "stats", "analysis"
+  const[showVideo,setShowVideo]=useState(false);
   const rushCols=["CAR","YDS","AVG","TD","LONG"];
   const recCols=["REC","YDS","AVG","TD","LONG","TGTS"];
 
@@ -1309,7 +1310,7 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
       h("div",{className:"hero-m"},date),
       g.ven?h("div",{className:"hero-m",style:{marginTop:".15rem"}},g.ven):null,
       g.att?h("div",{className:"hero-m",style:{marginTop:".15rem"}},`Attendance: ${g.att.toLocaleString()}`):null,
-      h("a",{className:"hl-btn",href:`https://www.youtube.com/results?search_query=${encodeURIComponent(`${tn(g.at)} vs ${tn(g.ht)} ${g.season?.year||new Date(g.date).getFullYear()} week ${g.week?.number||""} highlights NFL`)}`,target:"_blank",rel:"noopener noreferrer"},
+      h("button",{className:"hl-btn",onClick:()=>setShowVideo(true)},
         h("svg",{viewBox:"0 0 24 24"},h("path",{d:"M23.5 6.2a3 3 0 0 0-2.1-2.1C19.5 3.5 12 3.5 12 3.5s-7.5 0-9.4.6A3 3 0 0 0 .5 6.2 31.3 31.3 0 0 0 0 12a31.3 31.3 0 0 0 .5 5.8 3 3 0 0 0 2.1 2.1c1.9.6 9.4.6 9.4.6s7.5 0 9.4-.6a3 3 0 0 0 2.1-2.1A31.3 31.3 0 0 0 24 12a31.3 31.3 0 0 0-.5-5.8zM9.6 15.6V8.4l6.3 3.6-6.3 3.6z"})),"Watch Highlights"),
       h("div",{className:"hero-e"},
         h("div",{className:"hero-el"},"Excitement Index"),
@@ -1326,6 +1327,20 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
           h("div",{className:"gauge-label"},
             h("div",{className:`gauge-score ${cc(og.c)}`},exc.total),
             h("div",{className:`gauge-grade ${cc(og.c)}`},`${og.g} — ${og.l}`))))),
+    // Video popup modal
+    showVideo?h("div",{className:"vid-overlay",onClick:()=>setShowVideo(false)},
+      h("div",{className:"vid-modal",onClick:e=>e.stopPropagation()},
+        h("button",{className:"vid-close",onClick:()=>setShowVideo(false)},"\u2715"),
+        h("iframe",{
+          src:`https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(`${tn(g.at)} vs ${tn(g.ht)} ${g.season?.year||new Date(g.date).getFullYear()} week ${g.week?.number||""} highlights NFL`)}&autoplay=1`,
+          className:"vid-frame",
+          allow:"autoplay; encrypted-media; picture-in-picture; fullscreen",
+          allowFullScreen:true,
+          frameBorder:"0"
+        }),
+        h("a",{className:"vid-fallback",href:`https://www.youtube.com/results?search_query=${encodeURIComponent(`${tn(g.at)} vs ${tn(g.ht)} ${g.season?.year||new Date(g.date).getFullYear()} week ${g.week?.number||""} highlights NFL`)}`,target:"_blank",rel:"noopener noreferrer"},"Open on YouTube \u2192")
+      )
+    ):null,
     // Tab navigation
     h("div",{className:"tab-bar an a1"},
       h("button",{className:`tab-btn${tab==="overview"?" active":""}`,onClick:()=>setTab("overview")},"Overview"),
@@ -1349,18 +1364,62 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
             h("div",{className:"ptx"},h("span",{className:`ptg ${cls}`},lbl),playText,h("span",{style:{color:"var(--text-3)",fontSize:".8em"}},scoreText)))})):null
     ):null,
     // STATS TAB
-    tab==="stats"?h(Fragment,null,
-      (box&&box.length>0)?h("div",{className:"sec an a1"},h("div",{className:"sec-h"},"Box Score"),
-        h("table",{className:"bt"},h("thead",null,h("tr",null,h("th",null,""),
-          ...(box[0]?.qs||[]).map((_,i)=>h("th",{key:i},i>=4?`OT${i>4?i-3:""}`:`Q${i+1}`)),h("th",null,"Final"))),
-          h("tbody",null,box.map((r,i)=>h("tr",{key:i,className:r.win?"win":""},h("td",null,r.team),...(r.qs||[]).map((q,qi)=>h("td",{key:qi},q==null?"\u2014":q)),h("td",{className:"fc"},r.total==null?"\u2014":r.total)))))):null,
-      (stats&&stats.length>0)?h("div",{className:"sec an a2"},h("div",{className:"sec-h"},"Team Statistics"),
-        h("table",{className:"st"},h("thead",null,h("tr",null,h("th",{style:{textAlign:"right",width:"35%"}},box[0]?.team||"Away"),h("th",{style:{textAlign:"center",width:"30%"}},""),h("th",{style:{textAlign:"left",width:"35%"}},box[1]?.team||"Home"))),
-          h("tbody",null,stats.map((s,i)=>h("tr",{key:i},h("td",{style:{textAlign:"right"}},s.away),h("td",{className:"sn"},s.label),h("td",{style:{textAlign:"left"}},s.home)))))):null,
-      (pStats&&pStats.passing&&pStats.rushing&&pStats.receiving&&(pStats.passing.length>0||pStats.rushing.length>0||pStats.receiving.length>0))?
-        h("div",{className:"sec an a3"},h("div",{className:"sec-h"},"Player Statistics"),h("table",{className:"pst"},h("tbody",null,
-          pTable("Passing",pStats.passing,passCols),pTable("Rushing",pStats.rushing,rushCols),pTable("Receiving",pStats.receiving,recCols)))):null
-    ):null,
+    tab==="stats"?(()=>{
+      try{
+        const secs=[];
+        // Box Score
+        if(box&&box.length>0){
+          const qHeaders=[h("th",{key:"blank"},"")];
+          const qs=box[0]?.qs||[];
+          for(let i=0;i<qs.length;i++) qHeaders.push(h("th",{key:`q${i}`},i>=4?`OT${i>4?i-3:""}`:`Q${i+1}`));
+          qHeaders.push(h("th",{key:"fin"},"Final"));
+          const rows=box.map((r,ri)=>{
+            const cells=[h("td",{key:"tm"},r.team)];
+            for(let qi=0;qi<(r.qs||[]).length;qi++) cells.push(h("td",{key:`q${qi}`},(r.qs||[])[qi]==null?"\u2014":(r.qs||[])[qi]));
+            cells.push(h("td",{key:"tot",className:"fc"},r.total==null?"\u2014":r.total));
+            return h("tr",{key:`box${ri}`,className:r.win?"win":""},cells);
+          });
+          secs.push(h("div",{key:"boxscore",className:"sec an a1"},h("div",{className:"sec-h"},"Box Score"),
+            h("table",{className:"bt"},h("thead",null,h("tr",null,qHeaders)),h("tbody",null,rows))));
+        }
+        // Team Statistics
+        if(stats&&stats.length>0){
+          const tRows=stats.map((s,i)=>h("tr",{key:`ts${i}`},
+            h("td",{style:{textAlign:"right"}},s.away),
+            h("td",{className:"sn"},s.label),
+            h("td",{style:{textAlign:"left"}},s.home)));
+          secs.push(h("div",{key:"teamstats",className:"sec an a2"},h("div",{className:"sec-h"},"Team Statistics"),
+            h("table",{className:"st"},
+              h("thead",null,h("tr",null,
+                h("th",{style:{textAlign:"right",width:"35%"}},box[0]?.team||"Away"),
+                h("th",{style:{textAlign:"center",width:"30%"}},""),
+                h("th",{style:{textAlign:"left",width:"35%"}},box[1]?.team||"Home"))),
+              h("tbody",null,tRows))));
+        }
+        // Player Statistics
+        if(pStats){
+          const hasPassing=(pStats.passing||[]).length>0;
+          const hasRushing=(pStats.rushing||[]).length>0;
+          const hasReceiving=(pStats.receiving||[]).length>0;
+          if(hasPassing||hasRushing||hasReceiving){
+            const ptbody=[];
+            if(hasPassing){const pt=pTable("Passing",pStats.passing,passCols);if(pt)ptbody.push(pt);}
+            if(hasRushing){const pt=pTable("Rushing",pStats.rushing,rushCols);if(pt)ptbody.push(pt);}
+            if(hasReceiving){const pt=pTable("Receiving",pStats.receiving,recCols);if(pt)ptbody.push(pt);}
+            if(ptbody.length>0){
+              secs.push(h("div",{key:"playerstats",className:"sec an a3"},h("div",{className:"sec-h"},"Player Statistics"),
+                h("table",{className:"pst"},h("tbody",null,ptbody))));
+            }
+          }
+        }
+        if(secs.length===0) return h("div",{className:"sec",style:{padding:"2rem",textAlign:"center",color:"var(--text-3)",fontFamily:"JetBrains Mono",fontSize:".75rem"}},"No stats available for this game.");
+        return h(Fragment,null,secs);
+      }catch(e){
+        return h("div",{className:"sec",style:{padding:"2rem",textAlign:"center"}},
+          h("div",{style:{color:"var(--red)",fontFamily:"Oswald",fontSize:"1rem",marginBottom:".5rem"}},"Stats Error"),
+          h("div",{style:{color:"var(--text-3)",fontFamily:"JetBrains Mono",fontSize:".75rem"}},e.message||"Failed to render stats"));
+      }
+    })():null,
     // ANALYSIS TAB
     tab==="analysis"?h(Fragment,null,
       h("div",{className:"sec an a4"},h("div",{className:"sec-h"},"Excitement Breakdown"),
