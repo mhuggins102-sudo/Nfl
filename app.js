@@ -1479,7 +1479,11 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
             h("div",{className:"ptx"},h("span",{className:`ptg ${cls}`},lbl),playText,h("span",{style:{color:"var(--text-3)",fontSize:".8em"}},scoreText)))})):null
     ):null,
     // STATS TAB
-    tab==="stats"?h(Catch,null,h(StatsTab,{box,stats,pStats})):null,
+    tab==="stats"?h("div",null,
+      h("div",{style:{padding:".75rem 1rem",background:"#0d1117",border:"1px solid #30363d",borderRadius:".5rem",marginBottom:"1rem",fontFamily:"JetBrains Mono,monospace",fontSize:".75rem",color:"#58a6ff"}},
+        "Stats debug: box="+JSON.stringify(box?.length)+", stats="+JSON.stringify(stats?.length)+", pStats.passing="+JSON.stringify(pStats?.passing?.length)+", pStats.rushing="+JSON.stringify(pStats?.rushing?.length)+", pStats.receiving="+JSON.stringify(pStats?.receiving?.length)),
+      h(Catch,null,h(StatsTab,{box:box||[],stats:stats||[],pStats:pStats||{passing:[],rushing:[],receiving:[]}}))
+    ):null,
     // ANALYSIS TAB
     tab==="analysis"?h(Fragment,null,
       h("div",{className:"sec an a4"},h("div",{className:"sec-h"},"Excitement Breakdown"),
