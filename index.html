@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 	<script>
-(()=>{const d=document.createElement('pre');d.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;margin:0;padding:12px 40px 12px 12px;white-space:pre-wrap;overflow:auto;max-height:50vh;background:rgba(17,17,17,.95);color:#f66;font:12px/1.35 monospace;cursor:pointer';d.title='Click to dismiss';d.onclick=()=>d.remove();function show(e){const msg=e&&e.stack?e.stack:String(e);if(msg==='Script error'||msg==='Script error.')return;d.textContent+='\n'+msg;if(!d.parentNode)document.body.appendChild(d);}window.addEventListener('error',ev=>show(ev.error||ev.message||ev));window.addEventListener('unhandledrejection',ev=>show(ev.reason||ev));})();
+(()=>{const d=document.createElement('pre');d.style.cssText='position:fixed;top:0;left:0;right:0;z-index:99999;margin:0;padding:12px 40px 12px 12px;white-space:pre-wrap;overflow:auto;max-height:50vh;background:rgba(17,17,17,.95);color:#f66;font:12px/1.35 monospace;cursor:pointer';d.title='Click to dismiss';d.onclick=()=>d.remove();function show(e){const msg=e&&e.stack?e.stack:String(e);d.textContent+='\n'+msg;if(!d.parentNode)document.body.appendChild(d);}window.addEventListener('error',ev=>show(ev.error||ev.message||ev));window.addEventListener('unhandledrejection',ev=>show(ev.reason||ev));})();
 </script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">

@@ -1165,6 +1165,29 @@ function CategoryModal({cat,k,onClose,g,wpStats,enrichedPlays,sumData,wpSeries})
   );
 }
 
+// ── Error Boundary — wraps entire app to prevent blank screen on render errors ──
+class AppBoundary extends Component{
+  constructor(p){super(p);this.state={err:null,info:null};}
+  static getDerivedStateFromError(e){return{err:e};}
+  componentDidCatch(err,info){
+    console.error("React render error:",err);
+    if(info?.componentStack)console.error("Component stack:",info.componentStack);
+    this.setState({info:info?.componentStack||""});
+  }
+  render(){
+    if(this.state.err){
+      const msg=String(this.state.err?.message||this.state.err||"Unknown error");
+      const stack=this.state.info||"";
+      return h("div",{style:{padding:"2rem",maxWidth:"700px",margin:"2rem auto",fontFamily:"monospace"}},
+        h("div",{style:{color:"#f66",fontSize:"1.3rem",fontWeight:"bold",marginBottom:"1rem"}},"Something went wrong"),
+        h("div",{style:{color:"#e8e8e8",fontSize:".85rem",lineHeight:1.6,marginBottom:"1rem",whiteSpace:"pre-wrap",background:"#1a1a2e",padding:"1rem",borderRadius:".5rem"}},msg),
+        stack?h("div",{style:{color:"#888",fontSize:".7rem",lineHeight:1.5,whiteSpace:"pre-wrap",background:"#111",padding:"1rem",borderRadius:".5rem"}},stack):null,
+        h("button",{onClick:()=>this.setState({err:null,info:null}),style:{marginTop:"1rem",padding:".5rem 1.5rem",background:"#d4a017",color:"#000",border:"none",borderRadius:".25rem",cursor:"pointer",fontWeight:"bold"}},"Try Again"));
+    }
+    return this.props.children;
+  }
+}
+
 // ── Main App ──
 function App(){
   const[t1,sT1]=useState("");const[t2,sT2]=useState("");const[ssn,sSsn]=useState("2025");const[wk,sWk]=useState("");const[st,sSt]=useState("2");
@@ -1478,11 +1501,10 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
           return h("div",{key:i,className:"pi"},h("div",{className:"pt2"},`${p.period>=5?"OT":`Q${p.period}`} ${p.clock}`),
             h("div",{className:"ptx"},h("span",{className:`ptg ${cls}`},lbl),playText,h("span",{style:{color:"var(--text-3)",fontSize:".8em"}},scoreText)))})):null
     ):null,
-    // STATS TAB
-    tab==="stats"?h("div",null,
-      h("div",{style:{padding:".75rem 1rem",background:"#0d1117",border:"1px solid #30363d",borderRadius:".5rem",marginBottom:"1rem",fontFamily:"JetBrains Mono,monospace",fontSize:".75rem",color:"#58a6ff"}},
-        "Stats debug: box="+JSON.stringify(box?.length)+", stats="+JSON.stringify(stats?.length)+", pStats.passing="+JSON.stringify(pStats?.passing?.length)+", pStats.rushing="+JSON.stringify(pStats?.rushing?.length)+", pStats.receiving="+JSON.stringify(pStats?.receiving?.length)),
-      h(Catch,null,h(StatsTab,{box:box||[],stats:stats||[],pStats:pStats||{passing:[],rushing:[],receiving:[]}}))
+    // STATS TAB — simplified to diagnose blank page
+    tab==="stats"?h("div",{style:{padding:"2rem",margin:"1rem 0",background:"#1a1a2e",borderRadius:".5rem",textAlign:"center"}},
+      h("p",{style:{color:"#58a6ff",fontFamily:"monospace",fontSize:"1rem"}},"Stats tab is rendering. If you see this, the tab switch works."),
+      h("p",{style:{color:"#888",fontFamily:"monospace",fontSize:".8rem",marginTop:".5rem"}},"box="+String(box?.length||0)+" stats="+String(stats?.length||0)+" pStats="+String(pStats?Object.keys(pStats).join(","):"null"))
     ):null,
     // ANALYSIS TAB
     tab==="analysis"?h(Fragment,null,
@@ -1509,4 +1531,4 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
     ):null);
 }
 
-createRoot(document.getElementById("app")).render(h(App));
+createRoot(document.getElementById("app")).render(h(AppBoundary,null,h(App)));
