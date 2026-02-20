@@ -1490,7 +1490,7 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
         h("table",{className:"bt"},h("thead",null,h("tr",null,h("th",null,""),
           ...(box[0]?.qs||[]).map((_,i)=>h("th",{key:i},i>=4?`OT${i>4?i-3:""}`:`Q${i+1}`)),h("th",null,"Final"))),
           h("tbody",null,box.map((r,i)=>h("tr",{key:i,className:r.win?"win":""},h("td",null,r.team),...r.qs.map((q,qi)=>h("td",{key:qi},q==null?"\u2014":q)),h("td",{className:"fc"},r.total==null?"\u2014":r.total)))))):null,
-      WPChart({seriesE:wp?.series||[],seriesAlt:wp2?.series||[],modelSel:wpModel,onModelChange:setWpModel,mode:wpMode,onModeChange:setWpMode,exc,topLev:(sumData?.enrichedPlays||sumData?.topLeveragePlays||[]),homeTeam:g.ht,awayTeam:g.at,scoringPlays:sumData?.scoringPlays||[]}),
+      h(WPChart,{seriesE:wp?.series||[],seriesAlt:wp2?.series||[],modelSel:wpModel,onModelChange:setWpModel,mode:wpMode,onModeChange:setWpMode,exc,topLev:(sumData?.enrichedPlays||sumData?.topLeveragePlays||[]),homeTeam:g.ht,awayTeam:g.at,scoringPlays:sumData?.scoringPlays||[]}),
       h("div",{className:"sec an a5"},h("div",{className:"sec-h"},"Game Recap"),
         h("div",{className:"wb"},sumLoading?h("p",{style:{fontStyle:"italic",color:"var(--text-3)"}},"Generating game recap..."):
           summary?summary.map((p,i)=>h("p",{key:i},p)):h("p",{style:{color:"var(--text-3)"}},"Recap unavailable."))),
@@ -1501,11 +1501,8 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
           return h("div",{key:i,className:"pi"},h("div",{className:"pt2"},`${p.period>=5?"OT":`Q${p.period}`} ${p.clock}`),
             h("div",{className:"ptx"},h("span",{className:`ptg ${cls}`},lbl),playText,h("span",{style:{color:"var(--text-3)",fontSize:".8em"}},scoreText)))})):null
     ):null,
-    // STATS TAB — simplified to diagnose blank page
-    tab==="stats"?h("div",{style:{padding:"2rem",margin:"1rem 0",background:"#1a1a2e",borderRadius:".5rem",textAlign:"center"}},
-      h("p",{style:{color:"#58a6ff",fontFamily:"monospace",fontSize:"1rem"}},"Stats tab is rendering. If you see this, the tab switch works."),
-      h("p",{style:{color:"#888",fontFamily:"monospace",fontSize:".8rem",marginTop:".5rem"}},"box="+String(box?.length||0)+" stats="+String(stats?.length||0)+" pStats="+String(pStats?Object.keys(pStats).join(","):"null"))
-    ):null,
+    // STATS TAB
+    tab==="stats"?h(Catch,null,h(StatsTab,{box:box||[],stats:stats||[],pStats:pStats||{passing:[],rushing:[],receiving:[]}})):null,
     // ANALYSIS TAB
     tab==="analysis"?h(Fragment,null,
       h("div",{className:"sec an a4"},h("div",{className:"sec-h"},"Excitement Breakdown"),
@@ -1514,7 +1511,7 @@ function Detail({g,d,summary,sumData,sumLoading,meth,sMeth,onBack}){
         return h("div",{key:k,className:"gc",onClick:()=>setCatModal({k,cat:v}),style:{cursor:"pointer"}},
           h("div",{className:"gi"},h("h3",null,v.name),h("div",{className:"ds"},v.desc),h("div",{className:"dt"},v.detail),h("div",{className:"br"},h("div",{className:`bf ${bc(gr.c)}`,style:{width:`${pct}%`}}))),
           h("div",{className:`gbg ${cc(gr.c)}`},h("div",null,gr.g),h("div",{className:"pt"},`${v.score}/${v.max}`)))}))),
-      WPChart({seriesE:wp?.series||[],seriesAlt:wp2?.series||[],modelSel:wpModel,onModelChange:setWpModel,mode:wpMode,onModeChange:setWpMode,exc,topLev:(sumData?.enrichedPlays||sumData?.topLeveragePlays||[]),homeTeam:g.ht,awayTeam:g.at,scoringPlays:sumData?.scoringPlays||[]}),
+      h(WPChart,{seriesE:wp?.series||[],seriesAlt:wp2?.series||[],modelSel:wpModel,onModelChange:setWpModel,mode:wpMode,onModeChange:setWpMode,exc,topLev:(sumData?.enrichedPlays||sumData?.topLeveragePlays||[]),homeTeam:g.ht,awayTeam:g.at,scoringPlays:sumData?.scoringPlays||[]}),
       h("div",{className:"sec an a7"},
       h("button",{className:"mt",onClick:()=>sMeth(!meth)},meth?"\u25be":"\u25b8"," Scoring Methodology"),
       meth?h("div",{className:"mb"},
